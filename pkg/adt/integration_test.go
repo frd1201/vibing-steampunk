@@ -367,7 +367,7 @@ func TestIntegration_CRUD_FullWorkflow(t *testing.T) {
 		objectURL := GetObjectURL(ObjectTypeProgram, programName, "")
 
 		// Lock for delete
-		lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if err != nil {
 			t.Logf("Cleanup: Failed to lock for delete: %v", err)
 			return
@@ -388,7 +388,7 @@ func TestIntegration_CRUD_FullWorkflow(t *testing.T) {
 
 	// Step 2: Lock the object
 	t.Log("Step 2: Locking object...")
-	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 	if err != nil {
 		t.Fatalf("Failed to lock object: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestIntegration_LockUnlock(t *testing.T) {
 	// Try to lock a standard program (should exist in any system)
 	objectURL := "/sap/bc/adt/programs/programs/SAPMSSY0"
 
-	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 	if err != nil {
 		t.Skipf("Could not lock SAPMSSY0: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestIntegration_ClassWithUnitTests(t *testing.T) {
 		t.Log("Cleanup: Deleting class...")
 		objectURL := GetObjectURL(ObjectTypeClass, className, "")
 
-		lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if err != nil {
 			t.Logf("Cleanup: Failed to lock for delete: %v", err)
 			return
@@ -513,7 +513,7 @@ func TestIntegration_ClassWithUnitTests(t *testing.T) {
 
 	// Step 2: Lock the class
 	t.Log("Step 2: Locking class...")
-	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 	if err != nil {
 		t.Fatalf("Failed to lock class: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestIntegration_WriteProgram(t *testing.T) {
 	// Cleanup at end
 	defer func() {
 		objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", programName)
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
@@ -713,7 +713,7 @@ func TestIntegration_WriteClass(t *testing.T) {
 	// Cleanup at end
 	defer func() {
 		objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", className)
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
@@ -771,7 +771,7 @@ WRITE: / lv_message.`, strings.ToLower(programName), timestamp)
 	// Cleanup at end
 	defer func() {
 		objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", programName)
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
@@ -849,7 +849,7 @@ ENDCLASS.`, strings.ToLower(className))
 	// Cleanup at end
 	defer func() {
 		objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", className)
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
@@ -993,7 +993,7 @@ WRITE lv_`, programName)
 	// Clean up at the end
 	defer func() {
 		objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", programName)
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
@@ -1073,14 +1073,14 @@ lo_descr = cl_abap_typedescr=>describe_by_name( 'STRING' ).`, programName)
 
 	// Clean up at the end
 	defer func() {
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
 	}()
 
 	// Lock, update, unlock, activate
-	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 	if err != nil {
 		t.Fatalf("Failed to lock: %v", err)
 	}
@@ -1137,14 +1137,14 @@ DATA lo_descr TYPE REF TO cl_abap_classdescr.`, programName)
 
 	// Clean up at the end
 	defer func() {
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}
 	}()
 
 	// Lock, update, unlock, activate
-	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 	if err != nil {
 		t.Fatalf("Failed to lock: %v", err)
 	}
@@ -1210,7 +1210,7 @@ func TestIntegration_CreatePackage(t *testing.T) {
 
 	// Cleanup: Lock and delete the package
 	objectURL := fmt.Sprintf("/sap/bc/adt/packages/%s", strings.ToLower(packageName))
-	lock, err := client.LockObject(ctx, objectURL, "MODIFY")
+	lock, err := client.LockObject(ctx, objectURL, "MODIFY", "")
 	if err != nil {
 		t.Logf("Warning: Failed to lock package for cleanup: %v", err)
 		return
@@ -1249,7 +1249,7 @@ func TestIntegration_EditSource(t *testing.T) {
 	// Cleanup at end
 	defer func() {
 		objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", programName)
-		lock, _ := client.LockObject(ctx, objectURL, "MODIFY")
+		lock, _ := client.LockObject(ctx, objectURL, "MODIFY", "")
 		if lock != nil {
 			client.DeleteObject(ctx, objectURL, lock.LockHandle, "")
 		}

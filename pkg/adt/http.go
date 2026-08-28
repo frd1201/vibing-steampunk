@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -576,8 +575,8 @@ func (t *Transport) clearSAPSessionCookies() {
 	if !ok {
 		return
 	}
-	fresh, err := cookiejar.New(nil)
-	if err != nil {
+	fresh := newCookieJar()
+	if fresh == nil {
 		return
 	}
 	hc.Jar = fresh
