@@ -14,18 +14,21 @@
 ## Current Priorities
 
 ### 1. Graph Engine (`pkg/graph/`) — In Progress
-This section understated the package for four months; corrected 2026-08-24.
+This section understated the package for four months; corrected 2026-08-24,
+re-counted 2026-08-28 against the upstream merge.
 - Done: core types, parser dep extraction, boundary analyzer, **SQL adapters
   (`builder_sql.go` — CROSS + WBCROSSGT + WBCROSSGTX long names)**,
-  `builder_transport.go`, `builder_config.go`, and the `queries_*.go` surface
-  behind slim / health / impact / api-surface / rename / examples.
-  45 files, 195 test functions.
-- Pending: **D010INC** — the compile-time *load* graph, which is the one novel
-  source in the original design and exists only as two constants (`EdgeLoads`,
-  `SourceD010INC`). Also: unify `cli_deps.go` + `cli_extra.go` +
-  `ctxcomp/analyzer.go`, which still do not import `pkg/graph`.
-- Not wired: `graph.ExtractEffects` (side effects / LUW) has **no caller** — no
-  CLI command, no MCP action. Library, not feature.
+  `builder_transport.go`, `builder_config.go`, **`builder_loads.go` (D010INC —
+  the compile-time load graph, behind `vsp loads`)**, and the `queries_*.go`
+  surface behind slim / health / impact / api-surface / rename / examples.
+  51 files, 218 test functions.
+- Pending: **ADT adapters** — `SourceADTCallGraph`, `SourceADTWhereUsed` and
+  `SourceADTCDSDeps` are declared in `graph.go` and no builder produces them.
+  Also: unify `cli_deps.go` + `cli_extra.go` + `ctxcomp/analyzer.go`, which
+  still do not import `pkg/graph`.
+- Now wired (was listed here as caller-less): `graph.ExtractEffects` reaches
+  users through `vsp effects` (`cmd/vsp/effects.go`) and the MCP effects
+  handler (`internal/mcp/handlers_effects.go`).
 - Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md)
 
 ### 2. GUI Debugger (Issue #2) — Strategic
@@ -56,22 +59,31 @@ Key flags: `--mode focused|expert|hyperfocused`, `--read-only`, `--allowed-packa
 ## Codebase
 
 ```
-cmd/vsp/              CLI entry + 28 commands
-internal/mcp/
-  handlers_*.go       Domain handlers (read, edit, debug, graph, ...)
-  tools_register.go   Registration + mode logic
-  tools_focused.go    Focused mode whitelist
-  handlers_universal.go  Hyperfocused single-tool (SAP)
+cmd/vsp/              CLI entry + 53 top-level commands (87 incl. subcommands)
+internal/
+  mcp/
+    handlers_*.go       Domain handlers (read, edit, debug, graph, ...) — 43 files
+    tools_register.go   Registration + mode logic (154 tools)
+    tools_focused.go    Focused mode whitelist
+    tools_groups.go     Disableable tool groups (--disabled-groups)
+    handlers_universal.go  Hyperfocused single-tool (SAP)
+  lsp/                LSP server
 pkg/
   adt/                ADT client (HTTP, CSRF, sessions, all SAP ops)
+  saprfc/             Classic RFC transport (vsp rfc, RFC debugger channel)
   graph/              Dependency graph engine (in progress)
   ctxcomp/            Context compression (dep resolution for read)
-  abaplint/           ABAP lexer + parser (95 statement patterns; 13 lint rules, 8 on by default)
+  abaplint/           ABAP lexer + parser (76 statement types over 81 registrations
+                      in matcher.go register(); 13 lint rules, 8 on by default)
   dsl/                Fluent API, YAML workflows, batch ops
-  cache/              In-memory + SQLite
+  cache/              In-memory + SQLite (needs cgo)
+  config/             Configuration loading
   scripting/          Lua engine
+  jseval/             JS evaluation
+  ts2abap/, ts2go/    TypeScript transpilation (research)
   llvm2abap/          LLVM→ABAP (research)
   wasmcomp/           WASM→ABAP (research)
+embedded/             Embedded ZADT_VSP ABAP sources + deps ZIPs
 ```
 
 | Task | Files |
@@ -225,7 +237,11 @@ successors; do not add more.
 
 | Area | Risk | Notes |
 |------|------|-------|
-| `pkg/graph/` | New, incomplete | Only parser adapter; SQL/ADT adapters pending |
+| `pkg/graph/` | Adapters incomplete | Parser + CROSS/WBCROSSGT/D010INC/config/transport builders exist; the three `SourceADT*` constants have no builder |
+| Dep logic duplication | Three implementations | `cli_deps.go`, `cli_extra.go` and `ctxcomp/analyzer.go` each predate `pkg/graph/`; changing one does not change the others |
+| `pkg/abaplint/lint.go` | Silent no-op | 5 of 13 rules (`select_star`, `hardcoded_credentials`, `catch_cx_root`, `commit_in_loop`, `dynamic_call_no_try`) are not in `defaultRules()` and never run |
+| `*_test.go` named `fork_corrections` | Fork-only guard rails | `pkg/adt/` and `internal/mcp/` each carry one. They pin corrections upstream does not have (INCL write, Secure-cookie stripping, `SAP_SESSION_TYPE`, the CSRF GET fallback). Do not delete them to make an upstream merge quieter — that is exactly what they exist to catch |
+| `pkg/cache/` | cgo-dependent | SQLite backend needs a C compiler; without one `cmd/vsp` and `pkg/cache` tests fail by design |
 | `handlers_debugger.go` | ADT over a held session | Breakpoints and the debug loop both go through `/sap/bc/adt/debugger*` on the session in `handlers_debug_session.go`. The old "REST breakpoints 403 on newer SAP" was the stateless client, not the release |
 | `handlers_amdp.go` | Experimental | Session works, breakpoints unreliable |
 | `pkg/adt/ui5.go` | Read-only | Write needs `/UI5/CL_REPOSITORY_LOAD` |
