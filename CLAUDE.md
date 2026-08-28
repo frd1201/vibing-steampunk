@@ -9,23 +9,49 @@
 > Two rules that are easy to break by accident: upstream-worthy work branches off
 > `upstream/main` (not `main`), and never cherry-pick — always merge.
 
+> **Facts below verified against the tree on 2026-08-28.** Counts drift as code
+> lands. If a number here disagrees with the code, the code is right — fix the
+> number rather than working around it.
+
 ---
 
 ## Current Priorities
 
-### 1. Graph Engine (`pkg/graph/`) — In Progress
-Sequence: unify existing dep logic → SQL/ADT adapters → impact/path queries.
-- Done: core types, parser dep extraction, boundary analyzer (11 tests)
-- Pending: SQL adapters (CROSS/WBCROSSGT/D010INC), ADT adapters, unify `cli_deps.go` + `cli_extra.go` + `ctxcomp/analyzer.go`
-- Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md)
+### 1. Graph Engine (`pkg/graph/`) — Largely built, adapters incomplete
+The package is well past prototype: 44 files, 192 test functions, wired into
+both the CLI and the MCP analysis router.
 
-### 2. GUI Debugger (Issue #2) — Strategic
-Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
+**Built:** core types (`graph.go`), parser dep extraction (`builder_parser.go`),
+SQL builders for CROSS and WBCROSSGT (`builder_sql.go`), config and transport
+builders, boundary/crossing/effects/scope analysis, and a broad query layer —
+impact, health, API surface, rename, slim, signature, class sections, config
+where-used, transport boundaries, usage examples. Export formats: DOT, PlantUML,
+GraphML.
 
-### 3. Open Issues
-- **#88** Lock handle bug (EditSource/WriteSource) — real user report
-- **#55** RunReport in APC — architectural limit
-- **#46, #45** Sync script — low effort
+**Still open:**
+- **D010INC adapter** — `SourceD010INC` and `EdgeLoads` exist in `graph.go`, but no builder does.
+- **ADT adapters** — `SourceADTCallGraph`, `SourceADTWhereUsed`, `SourceADTCDSDeps` are declared constants only.
+- **Unification** — `cmd/vsp/cli_deps.go`, `cmd/vsp/cli_extra.go` and `pkg/ctxcomp/analyzer.go` still carry their own dependency logic alongside `pkg/graph/`.
+
+Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md).
+Later refinements: [006 knowledge MVP](reports/2026-04-05-006-graph-knowledge-mvp-design.md),
+[007 enrichment signals](reports/2026-04-05-007-graph-enrichment-signals-proposal.md),
+[2026-04-08-001 boundary direction](reports/2026-04-08-001-boundary-crossing-direction-proposal.md).
+
+### 2. GUI Debugger — Strategic
+Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`.
+Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
+
+### 3. Fork operations
+See [FORK.md](FORK.md) for the live list. Two items with dates attached:
+- **2026-10-15** — module-path review trigger (upstream's six-month code-commit clock).
+- **Pending back-fill** — `4b80378` (corrNr at LOCK time) is upstream-worthy but has no PR.
+
+### 4. Issue references
+Issue numbers in the reports (#88 lock handle, #55 RunReport in APC, #46/#45 sync
+script, #2 GUI debugger) refer to **`oisee/vibing-steampunk`** — this fork has no
+issue tracker of its own. Their current state is not mirrored here; check upstream
+before treating any of them as open.
 
 ---
 
@@ -35,8 +61,15 @@ Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_A
 go build -o vsp ./cmd/vsp              # Build
 go test ./...                           # Unit tests
 go test -tags=integration -v ./pkg/adt/ # Integration (needs SAP)
-make build-all                          # 9 platforms
+make build                              # Current platform → ./build/
+make build-all                          # 3 common platforms (linux-amd64, darwin-arm64, windows-amd64)
+make build-all-all                      # All 9 platforms (linux ×4, darwin ×2, windows ×3)
 ```
+
+`go test ./...` is fully green on Linux with cgo available (verified 2026-08-28,
+16 packages ok). On a box without a C compiler, `go-sqlite3` stubs out and
+`cmd/vsp` + `pkg/cache` fail with `requires cgo to work` — environment limit, not
+a defect. See FORK.md → *Local test baseline*.
 
 Key flags: `--mode focused|expert|hyperfocused`, `--read-only`, `--allowed-packages "Z*"`, `--disabled-groups 5THD`
 
@@ -45,30 +78,39 @@ Key flags: `--mode focused|expert|hyperfocused`, `--read-only`, `--allowed-packa
 ## Codebase
 
 ```
-cmd/vsp/              CLI entry + 28 commands
-internal/mcp/
-  handlers_*.go       Domain handlers (read, edit, debug, graph, ...)
-  tools_register.go   Registration + mode logic
-  tools_focused.go    Focused mode whitelist
-  handlers_universal.go  Hyperfocused single-tool (SAP)
+cmd/vsp/              CLI entry + 41 top-level commands (68 incl. subcommands)
+internal/
+  mcp/
+    handlers_*.go       Domain handlers (read, edit, debug, graph, ...) — 37 files
+    tools_register.go   Registration + mode logic (153 tools)
+    tools_focused.go    Focused mode whitelist (102 tools)
+    tools_groups.go     11 disableable groups (5/U, T, H, D, C, G, GC, R, I, N, X)
+    tools_aliases.go    Tool alias registration
+    handlers_universal.go  Hyperfocused single-tool (SAP)
+  lsp/                LSP server (jsonrpc, server, types)
 pkg/
   adt/                ADT client (HTTP, CSRF, sessions, all SAP ops)
-  graph/              Dependency graph engine (in progress)
+  graph/              Dependency graph engine (see Priorities)
   ctxcomp/            Context compression (dep resolution for read)
-  abaplint/           ABAP lexer + parser (91 statements, 8 lint rules)
+  abaplint/           ABAP lexer + parser (76 statement types, 13 lint rules, 8 on by default)
   dsl/                Fluent API, YAML workflows, batch ops
-  cache/              In-memory + SQLite
+  cache/              In-memory + SQLite (needs cgo)
+  config/             Configuration loading
   scripting/          Lua engine
+  jseval/             JS evaluation
+  ts2abap/, ts2go/    TypeScript transpilation (research)
   llvm2abap/          LLVM→ABAP (research)
   wasmcomp/           WASM→ABAP (research)
+embedded/             Embedded ZADT_VSP ABAP sources + deps ZIPs
 ```
 
 | Task | Files |
 |------|-------|
-| Add MCP tool | `tools_register.go` + `handlers_*.go` + `tools_focused.go` |
+| Add MCP tool | `tools_register.go` + `handlers_*.go` + `tools_focused.go` (+ `tools_groups.go` if groupable) |
 | Add ADT operation | `pkg/adt/client.go`, `crud.go`, `devtools.go`, `codeintel.go` |
 | Add graph feature | `pkg/graph/` |
-| Add lint rule | `pkg/abaplint/rules.go` |
+| Add lint rule | `pkg/abaplint/rules.go` + wire into `defaultRules()` in `lint.go` |
+| Add ABAP statement type | `pkg/abaplint/matcher.go` (`register()`) |
 | Add integration test | `pkg/adt/integration_test.go` |
 | Fix MCP/docs/config | `README.md`, `docs/cli-agents/*`, `handlers_universal.go` |
 
@@ -86,8 +128,14 @@ func (s *Server) handleX(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 }
 ```
 2. Register in `tools_register.go` with `shouldRegister("X")`
-3. Route in `handlers_analysis.go` (or appropriate router)
+3. Route in the matching router — analysis tools go through `routeAnalysisAction` in `handlers_analysis.go`
 4. Add to `tools_focused.go` if needed in focused mode
+5. Add to a group in `tools_groups.go` if it should be disableable via `--disabled-groups`
+
+**A new lint rule is not live until it is in `defaultRules()`.** Five of the 13
+implemented rules (`select_star`, `hardcoded_credentials`, `catch_cx_root`,
+`commit_in_loop`, `dynamic_call_no_try`) exist but are not wired into the default
+set — check before assuming a rule runs.
 
 ---
 
@@ -98,6 +146,7 @@ func (s *Server) handleX(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 3. **Session issues** — some CRUD/debugger flows are session-sensitive; verify stateful/stateless before changing transport or auth logic
 4. **Auth** — use basic OR cookies, not both
 5. **ZADT_VSP** — WebSocket debug/RFC/RunReport require it installed on SAP
+6. **cgo** — `pkg/cache` SQLite tests need a C compiler; without one they fail by design
 
 ## Security
 
@@ -163,10 +212,13 @@ Reports: `reports/YYYY-MM-DD-NNN-title.md`. SAP objects: `ZADT_<nn>_<name>`, `ZC
 
 | Area | Risk | Notes |
 |------|------|-------|
-| `pkg/graph/` | New, incomplete | Only parser adapter; SQL/ADT adapters pending |
-| `handlers_debugger.go` | WebSocket-only | REST breakpoints 403 on newer SAP; use ZADT_VSP |
+| `pkg/graph/` | Adapters incomplete | Parser + CROSS/WBCROSSGT/config/transport builders exist; D010INC and ADT adapters are declared constants with no builder |
+| Dep logic duplication | Three implementations | `cli_deps.go`, `cli_extra.go`, `ctxcomp/analyzer.go` each predate `pkg/graph/`; changing one does not change the others |
+| `pkg/abaplint/lint.go` | Silent no-op | 5 of 13 rules are not in `defaultRules()` and never run |
+| `handlers_debugger.go` | WebSocket-only | REST breakpoints 403 on newer SAP; use ZADT_VSP. `handlers_debugger_legacy.go` holds the old path |
 | `handlers_amdp.go` | Experimental | Session works, breakpoints unreliable |
 | `pkg/adt/ui5.go` | Read-only | Write needs `/UI5/CL_REPOSITORY_LOAD` |
-| `pkg/llvm2abap/`, `pkg/wasmcomp/` | Research | Not production; don't treat as stable |
+| `pkg/llvm2abap/`, `pkg/wasmcomp/`, `pkg/ts2abap/`, `pkg/ts2go/` | Research | Not production; don't treat as stable |
 | `pkg/adt/debugger.go` (REST) | Deprecated | Prefer `websocket_debug.go` |
+| `pkg/cache/` | cgo-dependent | SQLite backend needs a C compiler |
 | `docs/cli-agents/*` | Config drift | Codex TOML format may differ from Claude/Gemini JSON docs |
