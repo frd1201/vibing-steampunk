@@ -291,6 +291,57 @@ criterion until `fork_corrections_test.go` existed in `pkg/adt/` and
 `internal/mcp/`. Do that again before the next large sync: a correction with no
 test is a correction the merge can delete in silence.
 
+## Known issues — found, not fixed
+
+Both came out of the post-merge review on 2026-08-28. Neither was introduced by
+the sync: they predate it here **and** exist in `upstream/main` unchanged, so
+each is a candidate for an upstream PR rather than a fork-only patch. Recorded
+here so the next person does not have to rediscover them.
+
+### 1. `retryRequest` does not reconcile the session it just renewed
+
+`pkg/adt/http.go:331`. `Request()` reads three things back off every response:
+`adoptServerCookies` (`:238`), the CSRF token (`:265`) and the session id
+(`:270`). `retryRequest` reads back **none** of them.
+
+That matters because of *when* it runs. Its four callers (`:249`, `:260`,
+`:296`, `:317`) are the CSRF-refresh-on-403 path, the session-expiry recovery
+and the SSO re-auth — precisely the moments SAP issues a fresh
+`SAP_SESSIONID`. After the retry the jar holds the new session id while
+`config.Cookies` still holds the dead one; the next `addCookies` sends both
+under the same name, the server honours one of them, and the cached CSRF token
+belongs to the other. The caller is told its token is invalid.
+
+Upstream's own commit for `adoptServerCookies` — `b9c22f3` *"take the session
+id SAP reissues, instead of sending two"* — describes exactly this failure. The
+fix was added to `Request()` and not to `retryRequest`, so the gap between the
+two paths grew by one step at the sync; the omission itself is older than that.
+
+**Shape of the fix:** have `retryRequest` do what `Request()` does after
+reading the body — `adoptServerCookies(resp)`, then store a returned CSRF token
+and session id. Small and testable with `httptest`: serve a retry response
+carrying a new `SAP_SESSIONID` and a new `X-CSRF-Token`, then assert the next
+request sends one session id and the new token. While there, note that
+`retryRequest` re-sets the session-type header itself right after
+`setDefaultHeaders` has already done it — a second copy of that logic which
+does not know about `SessionKeep`.
+
+**Why no PR yet:** deliberately parked 2026-08-28. It is upstream-worthy (rule
+1 — branch off `upstream/main`, not `main`), so when it is picked up it should
+go through Workflow A rather than being patched here first.
+
+### 2. Unsynchronised jar swap on a shared `http.Client`
+
+`clearSAPSessionCookies` (`pkg/adt/http.go:641`) assigns `hc.Jar` while other
+goroutines may be inside `httpClient.Do` reading `c.Jar`. `cmd/vsp/fetchsources.go:93`
+fans several goroutines out over one `*adt.Client`, and the MCP server serves
+concurrent tool calls on one client too, so the race is reachable — the session
+expiry path at `:296` is not covered by `reauthMu`. Detectable under
+`go test -race`. A fix needs to decide what the concurrency contract of
+`Transport` actually is, which is why it is not a quick patch.
+
+---
+
 ## Known SHA-tracking gaps
 
 Content is correct in all cases; only git's ability to match commits is lost.
