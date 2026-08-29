@@ -1,6 +1,7 @@
 package adt
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -228,7 +229,7 @@ func TestNewHTTPClient_CheckRedirectPreservesADTHeaders(t *testing.T) {
 
 	// Build the "via" chain: the original request that carries the ADT
 	// headers we expect to be re-set on the redirect target.
-	orig, err := http.NewRequest(http.MethodPost,
+	orig, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		"https://sap.example.com:44300/sap/bc/adt/oo/classes/ZFOO?_action=LOCK", nil)
 	if err != nil {
 		t.Fatalf("NewRequest(orig): %v", err)
@@ -239,7 +240,7 @@ func TestNewHTTPClient_CheckRedirectPreservesADTHeaders(t *testing.T) {
 
 	// The redirect target that Go would follow — initially without any
 	// of the ADT headers (simulating Go having stripped them cross-origin).
-	next, err := http.NewRequest(http.MethodPost,
+	next, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		"https://sap.example.com:44300/sap/bc/adt/follow", nil)
 	if err != nil {
 		t.Fatalf("NewRequest(next): %v", err)
@@ -270,10 +271,12 @@ func TestNewHTTPClient_CheckRedirectHonoursLimit(t *testing.T) {
 		t.Fatal("CheckRedirect must be set")
 	}
 
-	next, _ := http.NewRequest(http.MethodGet, "https://sap.example.com:44300/", nil)
+	next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"https://sap.example.com:44300/", nil)
 	via := make([]*http.Request, 10)
 	for i := range via {
-		via[i], _ = http.NewRequest(http.MethodGet, "https://sap.example.com:44300/", nil)
+		via[i], _ = http.NewRequestWithContext(context.Background(), http.MethodGet,
+			"https://sap.example.com:44300/", nil)
 	}
 
 	if err := client.CheckRedirect(next, via); err == nil {

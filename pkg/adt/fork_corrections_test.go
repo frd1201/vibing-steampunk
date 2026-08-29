@@ -383,7 +383,7 @@ func TestCheckRedirect_DoesNotLeakCredentialsOffHost(t *testing.T) {
 
 	do := func(path string) {
 		t.Helper()
-		req, err := http.NewRequest(http.MethodGet, sap.URL+path, nil)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, sap.URL+path, nil)
 		if err != nil {
 			t.Fatalf("building request: %v", err)
 		}
@@ -430,7 +430,7 @@ func TestCheckRedirect_HostMatchIgnoresCaseAndPort(t *testing.T) {
 	cfg := NewConfig("https://SAPDEV.example.com", "TESTUSER", "secret")
 	client := cfg.NewHTTPClient()
 
-	first, _ := http.NewRequest(http.MethodGet, "https://SAPDEV.example.com/sap/bc/adt/discovery", nil)
+	first, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://SAPDEV.example.com/sap/bc/adt/discovery", nil)
 	first.SetBasicAuth("TESTUSER", "secret")
 	first.Header.Set("X-CSRF-Token", "tok")
 
@@ -446,7 +446,7 @@ func TestCheckRedirect_HostMatchIgnoresCaseAndPort(t *testing.T) {
 		{"a sibling subdomain is not", "https://idp.sapdev.example.com/saml/sso", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			next, _ := http.NewRequest(http.MethodGet, tc.target, nil)
+			next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.target, nil)
 			if err := client.CheckRedirect(next, []*http.Request{first}); err != nil {
 				t.Fatalf("CheckRedirect: %v", err)
 			}
@@ -468,14 +468,14 @@ func TestSessionKeep_UsesStatefulOnceASessionExists(t *testing.T) {
 	cfg := NewConfig("https://sap.example.com:44300", "u", "p", WithSessionType(SessionKeep))
 	transport := NewTransport(cfg)
 
-	req, _ := http.NewRequest(http.MethodGet, "https://sap.example.com:44300/sap/bc/adt/x", nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://sap.example.com:44300/sap/bc/adt/x", nil)
 	transport.setDefaultHeaders(req, &RequestOptions{})
 	if got := req.Header.Get("X-sap-adt-sessiontype"); got != "stateless" {
 		t.Errorf("with no session yet: got %q, want stateless", got)
 	}
 
 	transport.setSessionID("SID-1")
-	req2, _ := http.NewRequest(http.MethodGet, "https://sap.example.com:44300/sap/bc/adt/x", nil)
+	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://sap.example.com:44300/sap/bc/adt/x", nil)
 	transport.setDefaultHeaders(req2, &RequestOptions{})
 	if got := req2.Header.Get("X-sap-adt-sessiontype"); got != "stateful" {
 		t.Errorf("with a live session: got %q, want stateful — keep behaves as stateless", got)
