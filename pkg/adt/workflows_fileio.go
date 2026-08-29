@@ -109,23 +109,39 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to address the new object: %v", urlErr))
 		return result, nil
 	}
+	// The source goes to .../source/main, not to the object resource. Every
+	// other write path builds it with buildSourceURL; this one passed the bare
+	// object URL, so the PUT sent text/plain ABAP to a resource that expects the
+	// adtcore metadata document.
+	newSourceURL, urlErr := c.buildSourceURL(objType, newName, parentName)
+	if urlErr != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to address the new object's source: %v", urlErr))
+		return result, nil
+	}
 	lockResult, err := c.LockObject(ctx, newURL, "MODIFY", transport)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to lock new object: %v", err))
 		return result, nil
 	}
 
+	// Unconditional before: the defer ran on the happy path too, so every
+	// successful rename sent a second UNLOCK against a handle released four
+	// requests earlier.
+	newUnlocked := false
 	defer func() {
-		_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+		if !newUnlocked {
+			_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+		}
 	}()
 
-	err = c.UpdateSource(ctx, newURL, newSource, lockResult.LockHandle, transport)
+	err = c.UpdateSource(ctx, newSourceURL, newSource, lockResult.LockHandle, transport)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to write source: %v", err))
 		return result, nil
 	}
 
 	_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
+	newUnlocked = true
 
 	// 5. Activate new object
 	activation, err := c.Activate(ctx, newURL, newName)
@@ -154,6 +170,11 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 
 	err = c.DeleteObject(ctx, oldURL, oldLockResult.LockHandle, transport)
 	if err != nil {
+		// A successful DELETE releases the ENQUEUE with the object; a failed
+		// one does not. Without this the message told the caller to delete the
+		// object by hand while our own session still held a MODIFY lock on it,
+		// so the manual delete could not work either and recovery meant SM12.
+		_ = c.UnlockObject(ctx, oldURL, oldLockResult.LockHandle)
 		result.Message = fmt.Sprintf("New object %s created successfully, but failed to delete old object %s: %v. Please delete manually.", newName, oldName, err)
 		result.Success = true
 		return result, nil

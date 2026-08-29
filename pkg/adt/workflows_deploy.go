@@ -25,7 +25,7 @@ type DeployResult struct {
 
 // CreateFromFile creates a new ABAP object from a file and activates it.
 //
-// Workflow: Parse → Create → Lock → SyntaxCheck → Write → Unlock → Activate
+// Workflow: Parse → Create → SyntaxCheck → Lock → Write → Unlock → Activate
 //
 // The function automatically detects the object type and name from the file extension
 // and content. Supported file extensions: .clas.abap, .prog.abap, .intf.abap
@@ -212,7 +212,7 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 
 // UpdateFromFile updates an existing ABAP object from a file.
 //
-// Workflow: Parse → Lock → SyntaxCheck → Write → Unlock → Activate
+// Workflow: Parse → SyntaxCheck → Lock → Write → Unlock → Activate
 //
 // Example:
 //

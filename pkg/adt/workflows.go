@@ -20,7 +20,9 @@ type WriteProgramResult struct {
 	Message      string              `json:"message,omitempty"`
 }
 
-// WriteProgram performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate workflow.
+// WriteProgram performs SyntaxCheck -> Lock -> UpdateSource -> Unlock -> Activate.
+// The check comes first on purpose: it is a stateless request, and sent while
+// a lock is held it ends the stateful session the lock belongs to (issue #88).
 // This is a convenience method for updating existing programs.
 func (c *Client) WriteProgram(ctx context.Context, programName string, source string, transport string) (*WriteProgramResult, error) {
 	programName = strings.ToUpper(programName)
@@ -118,7 +120,8 @@ type WriteIncludeResult struct {
 	Message      string              `json:"message,omitempty"`
 }
 
-// WriteInclude performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate for an ABAP include.
+// WriteInclude performs SyntaxCheck -> Lock -> UpdateSource -> Unlock -> Activate
+// for an ABAP include. Check before lock: see WriteProgram.
 func (c *Client) WriteInclude(ctx context.Context, includeName string, source string, transport string) (*WriteIncludeResult, error) {
 	includeName = strings.ToUpper(includeName)
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/includes/%s", url.PathEscape(includeName))
@@ -202,7 +205,8 @@ type WriteClassResult struct {
 	Message      string              `json:"message,omitempty"`
 }
 
-// WriteClass performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate workflow for classes.
+// WriteClass performs SyntaxCheck -> Lock -> UpdateSource -> Unlock -> Activate
+// for classes. Check before lock: see WriteProgram.
 func (c *Client) WriteClass(ctx context.Context, className string, source string, transport string) (*WriteClassResult, error) {
 	className = strings.ToUpper(className)
 	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(className))

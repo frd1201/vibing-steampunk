@@ -69,7 +69,7 @@ cmd/vsp/              CLI entry + 53 top-level commands (87 incl. subcommands)
 internal/
   mcp/
     handlers_*.go       Domain handlers (read, edit, debug, graph, ...) — 43 files
-    tools_register.go   Registration + mode logic (154 tools)
+    tools_register.go   Registration + mode logic (147 tools in expert, 102 focused)
     tools_focused.go    Focused mode whitelist
     tools_groups.go     Disableable tool groups (--disabled-groups)
     handlers_universal.go  Hyperfocused single-tool (SAP)
@@ -79,7 +79,7 @@ pkg/
   saprfc/             Classic RFC transport (vsp rfc, RFC debugger channel)
   graph/              Dependency graph engine (in progress)
   ctxcomp/            Context compression (dep resolution for read)
-  abaplint/           ABAP lexer + parser (76 statement types over 81 registrations
+  abaplint/           ABAP lexer + parser (93 statement types over 95 registrations
                       in matcher.go register(); 13 lint rules, 8 on by default)
   dsl/                Fluent API, YAML workflows, batch ops
   cache/              In-memory + SQLite (needs cgo)

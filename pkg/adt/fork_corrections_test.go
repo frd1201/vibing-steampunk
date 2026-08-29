@@ -341,11 +341,96 @@ func TestFetchCSRFToken_FallsBackToGET(t *testing.T) {
 // keeps Authorization (issue #90); it must not hand Basic credentials and the
 // session CSRF token to an identity provider on another host, which is exactly
 // where an expired SSO session redirects to.
+// It drives a real redirect through the client rather than calling
+// CheckRedirect directly. That distinction is the whole test: net/http copies
+// every non-sensitive header onto the next request *before* CheckRedirect runs
+// (client.go — copyHeaders then checkRedirect), so a handler that merely
+// declines to set X-CSRF-Token off-host leaves Go's copy of it in place and the
+// identity provider receives the session token anyway. Calling CheckRedirect
+// with a freshly-made empty header map cannot see that, and passed while the
+// leak was live.
 func TestCheckRedirect_DoesNotLeakCredentialsOffHost(t *testing.T) {
-	cfg := NewConfig("https://sap.example.com:44300", "TESTUSER", "secret")
+	var idpAuth, idpCSRF, idpSessionType string
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idpAuth = r.Header.Get("Authorization")
+		idpCSRF = r.Header.Get("X-CSRF-Token")
+		idpSessionType = r.Header.Get("X-sap-adt-sessiontype")
+	}))
+	defer idp.Close()
+	// httptest serves on 127.0.0.1; "localhost" is a different hostname to
+	// Go's cross-origin test, which is what makes this a foreign host.
+	idpURL := strings.Replace(idp.URL, "127.0.0.1", "localhost", 1)
+
+	var sapAuth, sapCSRF string
+	var sap *httptest.Server
+	sap = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sap/bc/adt/discovery":
+			http.Redirect(w, r, idpURL+"/saml/sso", http.StatusFound)
+		case "/sap/bc/adt/hop":
+			// Same host, different path — the intra-SAP redirect the handler
+			// exists to serve.
+			http.Redirect(w, r, sap.URL+"/sap/bc/adt/landed", http.StatusFound)
+		default:
+			sapAuth = r.Header.Get("Authorization")
+			sapCSRF = r.Header.Get("X-CSRF-Token")
+		}
+	}))
+	defer sap.Close()
+
+	cfg := NewConfig(sap.URL, "TESTUSER", "secret")
 	client := cfg.NewHTTPClient()
 
-	first, _ := http.NewRequest(http.MethodGet, "https://sap.example.com:44300/sap/bc/adt/discovery", nil)
+	do := func(path string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, sap.URL+path, nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		req.SetBasicAuth("TESTUSER", "secret")
+		req.Header.Set("X-CSRF-Token", "tok")
+		req.Header.Set("X-sap-adt-sessiontype", "stateful")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+	}
+
+	do("/sap/bc/adt/discovery")
+	if idpAuth != "" {
+		t.Errorf("the identity provider received Authorization=%q", idpAuth)
+	}
+	if idpCSRF != "" {
+		t.Errorf("the identity provider received X-CSRF-Token=%q — declining to set a "+
+			"header is not the same as deleting the copy net/http already made", idpCSRF)
+	}
+	if idpSessionType != "" {
+		t.Errorf("the identity provider received X-sap-adt-sessiontype=%q", idpSessionType)
+	}
+
+	do("/sap/bc/adt/hop")
+	if sapAuth == "" {
+		t.Error("an intra-SAP redirect lost Authorization — issue #90 is what this handler is for")
+	}
+	if sapCSRF != "tok" {
+		t.Errorf("an intra-SAP redirect carried X-CSRF-Token=%q, want tok — the lock→write "+
+			"sequence needs it on the second hop", sapCSRF)
+	}
+}
+
+// TestCheckRedirect_HostMatchIgnoresCaseAndPort pins the comparison itself.
+// `req.URL.Host == sapHost` treated an ICM redirect that merely changed the
+// case of the FQDN, or spelled out :443, as a hop to a foreign host — which
+// silently dropped the very headers the handler exists to preserve. The port is
+// ignored outright, because the off-host branch now *deletes* those headers and
+// must not be stricter than net/http's own rule, which compares hostnames only:
+// one box answering on two ports is not a credential boundary.
+func TestCheckRedirect_HostMatchIgnoresCaseAndPort(t *testing.T) {
+	cfg := NewConfig("https://SAPDEV.example.com", "TESTUSER", "secret")
+	client := cfg.NewHTTPClient()
+
+	first, _ := http.NewRequest(http.MethodGet, "https://SAPDEV.example.com/sap/bc/adt/discovery", nil)
 	first.SetBasicAuth("TESTUSER", "secret")
 	first.Header.Set("X-CSRF-Token", "tok")
 
@@ -354,9 +439,11 @@ func TestCheckRedirect_DoesNotLeakCredentialsOffHost(t *testing.T) {
 		target  string
 		wantSet bool
 	}{
-		{"same host keeps the headers", "https://sap.example.com:44300/sap/bc/adt/other", true},
-		{"foreign idp gets nothing", "https://idp.example.org/saml/sso", false},
-		{"different port is a different host", "https://sap.example.com:8443/sap/bc/adt/other", false},
+		{"case-differing FQDN is the same host", "https://sapdev.example.com/sap/bc/adt/other", true},
+		{"explicit default port is the same host", "https://sapdev.example.com:443/sap/bc/adt/other", true},
+		{"another port on the same box is the same host", "https://sapdev.example.com:8443/sap/bc/adt/other", true},
+		{"foreign idp is not", "https://idp.example.org/saml/sso", false},
+		{"a sibling subdomain is not", "https://idp.sapdev.example.com/saml/sso", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			next, _ := http.NewRequest(http.MethodGet, tc.target, nil)
@@ -466,4 +553,121 @@ func TestWriteInclude_PassesTransportToLock(t *testing.T) {
 		}
 	}
 	t.Error("no LOCK request was recorded")
+}
+
+// --------------------------------------------------------------------------
+// Findings from the max-effort review of the post-merge fix
+// --------------------------------------------------------------------------
+
+// activationOKXML is an empty checklist: activation succeeded with nothing to
+// report. parseActivationResult reads Success from the absence of error
+// messages, so this is the shortest well-formed "it worked".
+const activationOKXML = `<?xml version="1.0" encoding="UTF-8"?>` +
+	`<chkl:messages xmlns:chkl="http://www.sap.com/abapxml/checklist"/>`
+
+// TestCreateTable_WritesSourceStatefully covers the one write in the package
+// that bypasses UpdateSource. CreateTable PUTs the DDL through
+// transport.Request directly, so it never inherited the `Stateful: true` that
+// UpdateSource has carried since the lock-handle work — a stateless PUT between
+// the stateful LOCK and the UNLOCK retires the ICM context the lock lives in
+// and the write comes back 423 InvalidLockHandle.
+func TestCreateTable_WritesSourceStatefully(t *testing.T) {
+	mock := &methodPathMock{
+		routes: []routedResponse{
+			resp("", "discovery", 200, "ok"),
+			resp(http.MethodPost, "/ddic/tables", 200, lockResponseXML),
+			resp(http.MethodPut, "/ddic/tables", 200, "ok"),
+			resp(http.MethodPost, "/activation", 200, activationOKXML),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	_ = client.CreateTable(context.Background(), CreateTableOptions{
+		Name:    "ZDEMO_TAB",
+		Package: "$ZDEMO",
+		Fields:  []TableField{{Name: "MANDT", Type: "MANDT", IsKey: true}},
+	})
+
+	var sawPut bool
+	for _, call := range mock.calls {
+		if call.method != http.MethodPut || !strings.Contains(call.path, "/ddic/tables") {
+			continue
+		}
+		sawPut = true
+		if got := call.header.Get("X-sap-adt-sessiontype"); got != "stateful" {
+			t.Errorf("the table DDL PUT sent X-sap-adt-sessiontype=%q; a stateless "+
+				"request between LOCK and UNLOCK retires the context the lock lives in", got)
+		}
+	}
+	if !sawPut {
+		t.Fatal("no PUT of the table source was recorded; the workflow did not reach the write")
+	}
+}
+
+// TestCreateTable_HonoursThePackageWhitelist pins CreateTable on the mutation
+// gate. It used to call checkSafety(OpCreate) alone — the operation check, not
+// the policy gate — so SAP_ALLOWED_PACKAGES and the transportable-edit opt-in
+// did not apply to it, and the corrNr it now puts on the LOCK was validated
+// nowhere. Every sibling mutator goes through checkMutation.
+func TestCreateTable_HonoursThePackageWhitelist(t *testing.T) {
+	mock := &methodPathMock{
+		routes: []routedResponse{
+			resp("", "discovery", 200, "ok"),
+			resp("", "/ddic/tables", 200, lockResponseXML),
+		},
+	}
+	safety := UnrestrictedSafetyConfig()
+	safety.AllowedPackages = []string{"$ZDEMO"}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithSafety(safety))
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	err := client.CreateTable(context.Background(), CreateTableOptions{
+		Name:    "ZDEMO_TAB",
+		Package: "ZFI_CORE",
+		Fields:  []TableField{{Name: "MANDT", Type: "MANDT", IsKey: true}},
+	})
+	if err == nil {
+		t.Fatal("CreateTable created a table in a package outside SAP_ALLOWED_PACKAGES")
+	}
+	for _, call := range mock.calls {
+		if strings.Contains(call.path, "/ddic/tables") {
+			t.Errorf("the gate refused only after talking to SAP: %s %s", call.method, call.path)
+		}
+	}
+}
+
+// TestRenameObject_WritesToTheSourceURL pins the URL the rename PUTs to.
+// RenameObject passed the bare object URL to UpdateSource while every other
+// write path builds .../source/main with buildSourceURL, so it sent text/plain
+// ABAP to a resource that expects the adtcore metadata document.
+func TestRenameObject_WritesToTheSourceURL(t *testing.T) {
+	mock := &methodPathMock{
+		routes: []routedResponse{
+			resp("", "discovery", 200, "ok"),
+			resp(http.MethodPost, "nodestructure", 200, packageNodeStructureXML),
+			resp(http.MethodGet, "/programs/programs/zdemo_old", 200, "REPORT zdemo_old."),
+			resp("", "/programs/programs", 200, lockResponseXML),
+			resp("", "/activation", 200, activationOKXML),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	_, _ = client.RenameObject(context.Background(), ObjectTypeProgram,
+		"ZDEMO_OLD", "ZDEMO_NEW", "$ZDEMO", "")
+
+	var sawPut bool
+	for _, call := range mock.calls {
+		if call.method != http.MethodPut {
+			continue
+		}
+		sawPut = true
+		if !strings.HasSuffix(call.path, "/source/main") {
+			t.Errorf("rename PUT went to %q, want the .../source/main resource", call.path)
+		}
+	}
+	if !sawPut {
+		t.Fatal("no PUT was recorded; the rename did not reach the write")
+	}
 }

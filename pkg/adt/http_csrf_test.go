@@ -35,7 +35,7 @@ func TestFetchCSRFTokenHeadFastPath(t *testing.T) {
 	defer srv.Close()
 
 	tr := newCSRFTestTransport(t, srv)
-	if err := tr.fetchCSRFToken(context.Background()); err != nil {
+	if err := tr.fetchCSRFToken(context.Background(), false); err != nil {
 		t.Fatalf("fetchCSRFToken: %v", err)
 	}
 	if got := tr.getCSRFToken(); got != "TOKEN-FROM-HEAD" {
@@ -65,7 +65,7 @@ func TestFetchCSRFTokenGetFallback(t *testing.T) {
 	defer srv.Close()
 
 	tr := newCSRFTestTransport(t, srv)
-	if err := tr.fetchCSRFToken(context.Background()); err != nil {
+	if err := tr.fetchCSRFToken(context.Background(), false); err != nil {
 		t.Fatalf("fetchCSRFToken: %v", err)
 	}
 	if got := tr.getCSRFToken(); got != "TOKEN-FROM-GET" {
@@ -86,7 +86,7 @@ func TestFetchCSRFTokenUnauthorizedDoesNotRetry(t *testing.T) {
 	defer srv.Close()
 
 	tr := newCSRFTestTransport(t, srv)
-	err := tr.fetchCSRFToken(context.Background())
+	err := tr.fetchCSRFToken(context.Background(), false)
 	if err == nil {
 		t.Fatal("expected an error for 401")
 	}
@@ -109,7 +109,7 @@ func TestFetchCSRFTokenRequiredPlaceholderFallsBack(t *testing.T) {
 	defer srv.Close()
 
 	tr := newCSRFTestTransport(t, srv)
-	if err := tr.fetchCSRFToken(context.Background()); err != nil {
+	if err := tr.fetchCSRFToken(context.Background(), false); err != nil {
 		t.Fatalf("fetchCSRFToken: %v", err)
 	}
 	if got := tr.getCSRFToken(); got != "REAL-TOKEN" {
@@ -135,7 +135,7 @@ func TestFetchCSRFTokenForbiddenHeadStillTriesGet(t *testing.T) {
 	defer srv.Close()
 
 	tr := newCSRFTestTransport(t, srv)
-	if err := tr.fetchCSRFToken(context.Background()); err != nil {
+	if err := tr.fetchCSRFToken(context.Background(), false); err != nil {
 		t.Fatalf("a 403 on HEAD must not stop the GET fallback: %v", err)
 	}
 	if got := tr.getCSRFToken(); got != "TOKEN-FROM-GET" {
@@ -153,7 +153,7 @@ func TestFetchCSRFTokenForbiddenEverywhereFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := newCSRFTestTransport(t, srv).fetchCSRFToken(context.Background())
+	err := newCSRFTestTransport(t, srv).fetchCSRFToken(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("expected a 403 authorization error, got %v", err)
 	}

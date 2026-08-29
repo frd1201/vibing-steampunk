@@ -159,11 +159,9 @@ func NewServer(cfg *Config) *Server {
 		opts = append(opts, adt.WithVerbose())
 	}
 	if cfg.SessionType != "" {
-		st := adt.SessionType(cfg.SessionType)
-		switch st {
-		case adt.SessionStateful, adt.SessionStateless, adt.SessionKeep:
+		if st, ok := adt.ParseSessionType(cfg.SessionType); ok {
 			opts = append(opts, adt.WithSessionType(st))
-		default:
+		} else {
 			fmt.Fprintf(os.Stderr, "[vsp] warning: unknown SAP_SESSION_TYPE %q, using default (stateless)\n", cfg.SessionType)
 		}
 	}

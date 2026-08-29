@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,24 @@ const (
 	// SessionKeep uses existing session if available, otherwise stateless.
 	SessionKeep SessionType = "keep"
 )
+
+// ParseSessionType turns a SAP_SESSION_TYPE value into a SessionType, reporting
+// whether it was one of the three known names. Surrounding whitespace and case
+// are ignored; an empty value is not an error, it simply means "unset" and
+// returns ok == false with the zero SessionType.
+//
+// One parser, because there were two: the MCP server compared the raw string
+// while the CLI lower-cased and trimmed it, so SAP_SESSION_TYPE=Stateful — or a
+// value with a trailing space out of a .env file — took effect on one side of
+// the same product and was warned away on the other.
+func ParseSessionType(v string) (SessionType, bool) {
+	switch st := SessionType(strings.ToLower(strings.TrimSpace(v))); st {
+	case SessionStateful, SessionStateless, SessionKeep:
+		return st, true
+	default:
+		return "", false
+	}
+}
 
 // Config holds the configuration for an ADT client connection.
 type Config struct {
@@ -313,32 +332,69 @@ func (c *Config) NewHTTPClient() *http.Client {
 	// Only for hops that stay on the SAP host. Re-attaching unconditionally
 	// sent Basic credentials and the session CSRF token to whatever host the
 	// chain led to — and an expired session on an SSO system leads to the
-	// identity provider, which is why redirectedAwayFromSAP exists. Go strips
-	// Authorization cross-origin for exactly this reason; restoring it must
-	// not also undo the protection.
+	// identity provider, which is why redirectedAwayFromSAP exists.
 	//
-	// If a SAML flow ever needs Authorization on a *foreign* host, this is the
-	// line to revisit — but that should be an explicit, named allowance rather
-	// than sending credentials to any host in the chain.
-	sapHost := ""
+	// Off-host the headers are DELETED, not merely left unset. Go's own
+	// makeHeadersCopier runs before CheckRedirect and copies every header that
+	// is not on its sensitive list — Authorization, Www-Authenticate, Cookie
+	// and Cookie2 are stripped cross-origin, X-CSRF-Token and
+	// X-sap-adt-sessiontype are not. So declining to *set* them here left the
+	// session's CSRF token going to the identity provider exactly as before;
+	// only an explicit Del actually stops it.
+	//
+	// The other half of that ordering is why the same-host branch is nearly a
+	// no-op: Go already preserves Authorization for a same-host or subdomain
+	// hop, so the re-attach only ever added anything cross-origin — which is
+	// now refused. A BTP SAML flow that genuinely needs Authorization on a
+	// foreign host (issue #90's abap → abap-web hop) therefore no longer gets
+	// it, and would need an explicit, named allowance for that one host rather
+	// than a blanket "any host in the chain".
+	//
+	// The comparison is on the *hostname*, case-folded — not on host:port.
+	// Two reasons, and they pull the same way:
+	//   - `==` on the raw host made an ICM redirect that merely changed the
+	//     case of the FQDN, or spelled out :443, look foreign, and the headers
+	//     this handler exists to preserve were dropped on an intra-SAP hop.
+	//   - the Del below must not be stricter than Go's own rule, which ignores
+	//     the port entirely (shouldCopyHeaderOnRedirect compares hostnames).
+	//     A box that answers on 44300 and redirects to 8443 is one machine;
+	//     deleting Basic credentials there would break a hop that worked
+	//     before this handler existed.
+	// redirectedAwayFromSAP (http.go) compares host:port with EqualFold, so it
+	// is stricter on the port and identical on case; the difference only shows
+	// on a port-changing hop, where this predicate is deliberately the looser
+	// of the two.
+	sapHostname := ""
 	if u, err := url.Parse(c.BaseURL); err == nil {
-		sapHost = u.Host
+		sapHostname = u.Hostname()
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
 		}
-		if len(via) > 0 && req.URL.Host == sapHost {
-			first := via[0]
-			if auth := first.Header.Get("Authorization"); auth != "" {
-				req.Header.Set("Authorization", auth)
-			}
-			if csrf := first.Header.Get("X-CSRF-Token"); csrf != "" {
-				req.Header.Set("X-CSRF-Token", csrf)
-			}
-			if st := first.Header.Get("X-sap-adt-sessiontype"); st != "" {
-				req.Header.Set("X-sap-adt-sessiontype", st)
-			}
+		if len(via) == 0 {
+			return nil
+		}
+		// An unparseable or scheme-less BaseURL leaves sapHostname empty. Treat
+		// that as "not the SAP host" so the credentials-off-host rule holds;
+		// the alternative is to silently disable the whole handler.
+		onSAPHost := sapHostname != "" &&
+			strings.EqualFold(req.URL.Hostname(), sapHostname)
+		if !onSAPHost {
+			req.Header.Del("Authorization")
+			req.Header.Del("X-CSRF-Token")
+			req.Header.Del("X-sap-adt-sessiontype")
+			return nil
+		}
+		first := via[0]
+		if auth := first.Header.Get("Authorization"); auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if csrf := first.Header.Get("X-CSRF-Token"); csrf != "" {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		if st := first.Header.Get("X-sap-adt-sessiontype"); st != "" {
+			req.Header.Set("X-sap-adt-sessiontype", st)
 		}
 		return nil
 	}

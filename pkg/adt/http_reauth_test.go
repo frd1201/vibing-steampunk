@@ -46,7 +46,7 @@ func TestFetchCSRFTokenRecoversFromAnIdentityProviderRedirect(t *testing.T) {
 	)
 	transport := NewTransportWithClient(cfg, client)
 
-	if err := transport.fetchCSRFToken(context.Background()); err != nil {
+	if err := transport.fetchCSRFToken(context.Background(), false); err != nil {
 		t.Fatalf("fetchCSRFToken: %v", err)
 	}
 	if reauths != 1 {
@@ -74,7 +74,7 @@ func TestFetchCSRFTokenDoesNotReauthenticateOnForbidden(t *testing.T) {
 	)
 	transport := NewTransportWithClient(cfg, client)
 
-	err := transport.fetchCSRFToken(context.Background())
+	err := transport.fetchCSRFToken(context.Background(), false)
 	if err == nil {
 		t.Fatal("fetchCSRFToken succeeded on a 403")
 	}
@@ -95,7 +95,7 @@ func TestFetchCSRFTokenWithoutReauthFuncReportsPlainly(t *testing.T) {
 	cfg := NewConfig("https://sap.example", "user", "pass")
 	transport := NewTransportWithClient(cfg, client)
 
-	err := transport.fetchCSRFToken(context.Background())
+	err := transport.fetchCSRFToken(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("error = %v, want a plain 401 report", err)
 	}

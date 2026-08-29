@@ -333,9 +333,15 @@ var objectTypes = map[CreatableObjectType]objectTypeInfo{
 // tryCleanupOrphanLock attempts to clear an orphan lock left behind by a failed creation.
 // SAP ADT sometimes creates ENQUEUE locks during object creation that aren't released on failure.
 // This function tries to acquire and immediately release such locks.
-func (c *Client) tryCleanupOrphanLock(ctx context.Context, objectURL string) {
+//
+// transport carries the caller's corrNr onto the LOCK. Both call sites have one
+// in scope, and on a system that insists on a transport for an object in a
+// transportable package a LOCK without it is refused — the error is swallowed by
+// design here, so the orphan simply survives and the caller's next LOCK
+// collides with it.
+func (c *Client) tryCleanupOrphanLock(ctx context.Context, objectURL, transport string) {
 	// Try to acquire the lock - this may succeed if it's our own orphan lock
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		// Lock acquisition failed - lock might be held by another user or doesn't exist
 		return
@@ -469,7 +475,7 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 	}
 
 	// Step 1: orphan lock cleanup (cheap; reuses the existing helper).
-	c.tryCleanupOrphanLock(ctx, objectURL)
+	c.tryCleanupOrphanLock(ctx, objectURL, transport)
 	pce.CleanupActions = append(pce.CleanupActions, "tried orphan-lock cleanup")
 
 	// Step 2: acquire a fresh lock owned by us, then delete the
@@ -680,7 +686,7 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 		// Get the object URL for lock cleanup
 		objectURL := GetObjectURL(opts.ObjectType, opts.Name, opts.ParentName)
 		if objectURL != "" {
-			c.tryCleanupOrphanLock(ctx, objectURL)
+			c.tryCleanupOrphanLock(ctx, objectURL, opts.Transport)
 
 			// Retry creation
 			_, err = c.transport.Request(ctx, creationURL, &RequestOptions{
@@ -1217,10 +1223,6 @@ type CreateTableOptions struct {
 // CreateTable creates a new DDIC transparent table from JSON-like options.
 // This is a high-level tool that handles the full workflow: create → set source → activate.
 func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error {
-	if err := c.checkSafety(OpCreate, "CreateTable"); err != nil {
-		return err
-	}
-
 	// Validate input
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
@@ -1232,6 +1234,23 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	if opts.Package == "" {
 		opts.Package = "$TMP"
 	}
+
+	// Unified mutation policy gate (op type + package + transport). This used
+	// to be a bare checkSafety(OpCreate), which is the operation check alone —
+	// so SAP_ALLOWED_PACKAGES and the transportable-edit opt-in did not apply
+	// to table creation, and the corrNr that now reaches LOCK below was never
+	// validated. Every sibling mutator goes through the gate; this one did not.
+	// Ordered after the defaulting above so opts.Package is "$TMP" rather than
+	// "" when the gate reads it.
+	if err := c.checkMutation(ctx, MutationContext{
+		Op:        OpCreate,
+		OpName:    "CreateTable",
+		Package:   opts.Package,
+		Transport: opts.Transport,
+	}); err != nil {
+		return err
+	}
+
 	if opts.DeliveryClass == "" {
 		opts.DeliveryClass = "A"
 	}
@@ -1288,6 +1307,12 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 		Query:       params,
 		Body:        []byte(ddlSource),
 		ContentType: "text/plain",
+		// Must match the lock session (issue #88). This path bypasses
+		// UpdateSource, which has carried the flag since the lock-handle work,
+		// and so was sending a *stateless* PUT between the stateful LOCK above
+		// and the UNLOCK below — SAP retires the ICM context the lock lives in
+		// and the write comes back 423 InvalidLockHandle.
+		Stateful: true,
 	})
 	if err != nil {
 		c.UnlockObject(ctx, tableURL, lock.LockHandle)
