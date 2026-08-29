@@ -476,7 +476,7 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 	// half-created object. If we cannot acquire a lock the cleanup
 	// stops here and we surface manual recovery steps; we never try
 	// to delete without a lock because that would 403 anyway.
-	lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if lockErr != nil {
 		pce.CleanupActions = append(pce.CleanupActions,
 			fmt.Sprintf("could not acquire lock for delete: %v", lockErr))
@@ -1272,7 +1272,7 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	tableURL := fmt.Sprintf("/sap/bc/adt/ddic/tables/%s", strings.ToLower(opts.Name))
 	sourceURL := tableURL + "/source/main"
 
-	lock, err := c.LockObject(ctx, tableURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, tableURL, "MODIFY", opts.Transport)
 	if err != nil {
 		return fmt.Errorf("locking table: %w", err)
 	}

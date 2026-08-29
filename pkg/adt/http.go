@@ -587,7 +587,15 @@ func (t *Transport) setDefaultHeaders(req *http.Request, opts *RequestOptions) {
 	// Set session header: per-request Stateful flag overrides global default.
 	// Lock→write→unlock sequences require stateful mode to maintain session
 	// affinity for lock handles (issue #88).
-	if opts.Stateful || t.config.SessionType == SessionStateful {
+	//
+	// SessionKeep means "use the existing session if there is one, otherwise
+	// stateless". It used to fall through to the stateless branch, so setting
+	// SAP_SESSION_TYPE=keep to cure lock-handle errors produced exactly the
+	// stateless behaviour the user was trying to escape, with no diagnostic.
+	stateful := opts.Stateful ||
+		t.config.SessionType == SessionStateful ||
+		(t.config.SessionType == SessionKeep && t.getSessionID() != "")
+	if stateful {
 		req.Header.Set("X-sap-adt-sessiontype", "stateful")
 	} else {
 		req.Header.Set("X-sap-adt-sessiontype", "stateless")

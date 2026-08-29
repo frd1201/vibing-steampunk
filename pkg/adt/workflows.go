@@ -12,12 +12,12 @@ import (
 
 // WriteProgramResult represents the result of writing a program.
 type WriteProgramResult struct {
-	Success      bool                       `json:"success"`
-	ProgramName  string                     `json:"programName"`
-	ObjectURL    string                     `json:"objectUrl"`
-	SyntaxErrors []SyntaxCheckResult        `json:"syntaxErrors,omitempty"`
-	Activation   *ActivationResult          `json:"activation,omitempty"`
-	Message      string                     `json:"message,omitempty"`
+	Success      bool                `json:"success"`
+	ProgramName  string              `json:"programName"`
+	ObjectURL    string              `json:"objectUrl"`
+	SyntaxErrors []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
+	Activation   *ActivationResult   `json:"activation,omitempty"`
+	Message      string              `json:"message,omitempty"`
 }
 
 // WriteProgram performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate workflow.
@@ -60,15 +60,16 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	result.SyntaxErrors = syntaxErrors // Include warnings if any
 
 	// Step 2: Lock the object
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
 	}
 
 	// Ensure we unlock on any error
+	unlocked := false
 	defer func() {
-		if !result.Success {
+		if !unlocked && !result.Success {
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
@@ -86,6 +87,7 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
+	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, programName)
@@ -150,13 +152,14 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	}
 	result.SyntaxErrors = syntaxErrors
 
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
 	}
+	unlocked := false
 	defer func() {
-		if !result.Success {
+		if !unlocked && !result.Success {
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
@@ -170,6 +173,7 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
+	unlocked = true
 
 	activation, err := c.Activate(ctx, objectURL, includeName)
 	if err != nil {
@@ -190,12 +194,12 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 
 // WriteClassResult represents the result of writing a class.
 type WriteClassResult struct {
-	Success      bool                       `json:"success"`
-	ClassName    string                     `json:"className"`
-	ObjectURL    string                     `json:"objectUrl"`
-	SyntaxErrors []SyntaxCheckResult        `json:"syntaxErrors,omitempty"`
-	Activation   *ActivationResult          `json:"activation,omitempty"`
-	Message      string                     `json:"message,omitempty"`
+	Success      bool                `json:"success"`
+	ClassName    string              `json:"className"`
+	ObjectURL    string              `json:"objectUrl"`
+	SyntaxErrors []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
+	Activation   *ActivationResult   `json:"activation,omitempty"`
+	Message      string              `json:"message,omitempty"`
 }
 
 // WriteClass performs Lock -> SyntaxCheck -> UpdateSource -> Unlock -> Activate workflow for classes.
@@ -237,14 +241,15 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	result.SyntaxErrors = syntaxErrors
 
 	// Step 2: Lock
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
 	}
 
+	unlocked := false
 	defer func() {
-		if !result.Success {
+		if !unlocked && !result.Success {
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
@@ -262,6 +267,7 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
+	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, className)
@@ -330,14 +336,15 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 	}
 
 	// Step 2: Lock
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
 	}
 
+	unlocked := false
 	defer func() {
-		if !result.Success {
+		if !unlocked && !result.Success {
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
@@ -355,6 +362,7 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
+	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, programName)
@@ -423,14 +431,15 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 	}
 
 	// Step 2: Lock
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", "")
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
 	}
 
+	unlocked := false
 	defer func() {
-		if !result.Success {
+		if !unlocked && !result.Success {
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
@@ -462,6 +471,7 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
+	unlocked = true
 
 	// Step 7: Activate
 	activation, err := c.Activate(ctx, objectURL, className)

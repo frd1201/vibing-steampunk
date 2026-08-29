@@ -35,9 +35,15 @@ re-counted 2026-08-28 against the upstream merge.
 Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
 
 ### 3. Open Issues
-- ~~**#88** Lock handle bug~~ — closed 2026-04-15 by `22517d4` (Stateful +
-  ModificationSupport guard), together with #91, #92, #98. Left here in struck
-  form because this list said "open" for four months after the fix.
+- **#88** Lock handle bug — *partly* closed. The stateful-session half holds
+  (`Stateful: true` on LOCK). The `ModificationSupport` guard from `22517d4` is
+  **gone**: it read `NoModification` as "read-only" when the SAP constant means
+  "tracking not needed", made every local object unwritable, and leaked the
+  ENQUEUE on the way out. `pkg/adt/crud.go` now guards on an empty
+  `LOCK_HANDLE` instead. The remaining half of the bug class is any *stateless*
+  request issued between LOCK and write — `SyntaxCheck` was moved before the
+  lock, and the package-safety search now runs stateful for the same reason.
+  Anything new added inside a locked window needs the same care.
 - **#55** RunReport in APC — architectural limit
 - **#46, #45** Sync script — low effort
 

@@ -146,7 +146,15 @@ func (c *Client) getObjectPackage(ctx context.Context, objectURL string) (string
 		return "", err
 	}
 
-	results, err := c.SearchObject(ctx, objectName, 20)
+	// Stateful on purpose. This search runs from the mutation gate, which
+	// UpdateSource/DeleteObject/UpdateClassInclude reach *while holding a
+	// lock*. A stateless request on that transport sends
+	// X-sap-adt-sessiontype: stateless, SAP retires the ICM context the lock
+	// belongs to, and the write that follows fails with 423
+	// InvalidLockHandle — the same bug class as the SyntaxCheck-under-lock
+	// hop that moved before the lock. The gate only ever runs as part of a
+	// mutation, so a stateful context is wanted here regardless.
+	results, err := c.searchObject(ctx, objectName, "", 20, true)
 	if err != nil {
 		return "", err
 	}
@@ -316,6 +324,13 @@ func CanonicalObjectType(s string) string {
 // maxResults: filtering after the fact silently drops results that didn't
 // fit in the pre-filter window.
 func (c *Client) SearchObjectByType(ctx context.Context, query, objectType string, maxResults int) ([]SearchResult, error) {
+	return c.searchObject(ctx, query, objectType, maxResults, false)
+}
+
+// searchObject is the shared implementation. stateful marks the request as
+// belonging to a stateful ADT session; see getObjectPackage for why the
+// package-resolution caller needs it.
+func (c *Client) searchObject(ctx context.Context, query, objectType string, maxResults int, stateful bool) ([]SearchResult, error) {
 	if maxResults <= 0 {
 		maxResults = 100
 	}
@@ -334,9 +349,10 @@ func (c *Client) SearchObjectByType(ctx context.Context, query, objectType strin
 	}
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/repository/informationsystem/search", &RequestOptions{
-		Method: http.MethodGet,
-		Query:  params,
-		Accept: "application/xml",
+		Method:   http.MethodGet,
+		Query:    params,
+		Accept:   "application/xml",
+		Stateful: stateful,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("search request failed: %w", err)

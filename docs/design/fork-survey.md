@@ -575,18 +575,24 @@ working tree.
 | **`generateRecordingID()` uses a bare timestamp format and collides** | `pkg/adt/recorder.go:104` | Augusto42 | trivial |
 | **`ExecuteABAP` discards the activation result** (`_, err = c.Activate(...)`) and cannot distinguish the wrapper's sentinel assertion from a real ABAP Unit failure — **a failing unit test reports success** | `pkg/adt/workflows_execute.go` | Augusto42 | small |
 
-**Two contested items — do not merge without deciding first.**
+**Two contested items — both decided by the 2026-08 upstream sync.**
 
-- **`LockObject` rejects `MODIFICATION_SUPPORT="NoModification"`** (`crud.go:66`, guarded by
-  `TestLockObject_RejectsNoModification` at `crud_reconcile_test.go:553`). Three forks argue
-  from SAP source that the constant is `CO_MOD_SUPPORT_NOT_NEEDED` — the *normal* value for
-  customer `Z*` objects, not an authorization verdict — and txape10 has a `VSP_HTTP_TRACE`
-  capture showing `NoModification` with a populated `CORRNR` followed by a **successful
-  PUT**. If they are right, upstream is blocking routine Z-object editing. Verify the ABAP
-  constant before acting; the fix deletes a test you currently rely on.
-- **`SyntaxCheck` before `Lock` vs after.** dme007 and wusxo24 move `SyntaxCheck` ahead of
-  `LockObject` in `workflows_deploy.go`; upstream's documented order is Lock → SyntaxCheck.
-  This is entangled with the stateless-hop issue below, so resolve them together.
+- **`MODIFICATION_SUPPORT="NoModification"` — the fork's critics were right.**
+  The guard is gone. The SAP constant is `CO_MOD_SUPPORT_NOT_NEEDED`, the normal
+  value for customer `Z*` objects, not an authorization verdict; reading it as
+  read-only made every local object unwritable, and because the guard returned
+  before unlocking it leaked the ENQUEUE it had just taken. `pkg/adt/crud.go`
+  now fails only when a LOCK comes back with no `LOCK_HANDLE`, which is the
+  genuinely unusable case. The test is
+  `TestLockObject_PassesThroughModificationSupport` in `crud_reconcile_test.go`;
+  `TestLockObject_RejectsNoModification`, cited by earlier revisions of this
+  survey, no longer exists.
+- **`SyntaxCheck` before `Lock` — settled, and for the reason below.** Both this
+  fork and upstream (`ff32cd7`) moved the check ahead of the lock. A syntax
+  check is a *stateless* request: sent while a lock is held it ends the
+  stateful session the lock belongs to, and the write that follows returns 423
+  InvalidLockHandle. `workflows_deploy.go` now checks syntax first in both
+  `CreateFromFile` and `UpdateFromFile`.
 
 **The most valuable bug *class*: a stateless hop between LOCK and PUT kills the lock.**
 Three forks found this independently. A stateless GET landing between the lock and the

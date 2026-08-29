@@ -310,11 +310,25 @@ func (c *Config) NewHTTPClient() *http.Client {
 	//     goes missing across a redirect, the second hop hits SAP with a
 	//     fresh (stateless) session-type or a missing CSRF token, and the
 	//     lock handle / mutation is rejected.
+	// Only for hops that stay on the SAP host. Re-attaching unconditionally
+	// sent Basic credentials and the session CSRF token to whatever host the
+	// chain led to — and an expired session on an SSO system leads to the
+	// identity provider, which is why redirectedAwayFromSAP exists. Go strips
+	// Authorization cross-origin for exactly this reason; restoring it must
+	// not also undo the protection.
+	//
+	// If a SAML flow ever needs Authorization on a *foreign* host, this is the
+	// line to revisit — but that should be an explicit, named allowance rather
+	// than sending credentials to any host in the chain.
+	sapHost := ""
+	if u, err := url.Parse(c.BaseURL); err == nil {
+		sapHost = u.Host
+	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
 		}
-		if len(via) > 0 {
+		if len(via) > 0 && req.URL.Host == sapHost {
 			first := via[0]
 			if auth := first.Header.Get("Authorization"); auth != "" {
 				req.Header.Set("Authorization", auth)

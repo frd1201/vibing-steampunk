@@ -785,6 +785,12 @@ func (s *Server) registerSearchTools(shouldRegister func(string) bool) {
 				mcp.Required(),
 				mcp.Description("Search query string (use * wildcard for partial match)"),
 			),
+			mcp.WithString("objectType",
+				mcp.Description("Restrict to an ADT object type. Short forms are accepted "+
+					"(CLAS, INTF, PROG, INCL, FUGR, FUNC, TABL, DDLS, ...) and expanded to "+
+					"their canonical codes. Filtering happens server-side, so maxResults "+
+					"applies after the type filter rather than before it."),
+			),
 			mcp.WithNumber("maxResults",
 				mcp.Description("Maximum number of results to return (default 100)"),
 			),
@@ -943,6 +949,10 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("access_mode",
 				mcp.Description("Access mode: MODIFY (default) or READ"),
+			),
+			mcp.WithString("transport",
+				mcp.Description("Transport request (corrNr) for an object in a transportable "+
+					"package. SAP wants it on the LOCK, not only on the write that follows."),
 			),
 		), s.handleLockObject)
 	}

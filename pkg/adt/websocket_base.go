@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"sort"
 	"strings"
@@ -137,7 +136,10 @@ func (c *BaseWebSocketClient) Connect(ctx context.Context) error {
 	// Some SAP systems reject standalone Basic Auth on WebSocket upgrade
 	// but accept it on regular HTTP to issue session cookies.
 	if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized && !c.hasCookieAuth() {
-		jar, _ := cookiejar.New(nil)
+		// newCookieJar, not cookiejar.New: on a plain-HTTP system behind a
+		// proxy that still marks its cookies Secure, a bare jar stores them
+		// Secure and the ws:// upgrade that follows sends none of them.
+		jar := newCookieJar()
 		preAuthClient := &http.Client{
 			Jar: jar,
 			Transport: &http.Transport{

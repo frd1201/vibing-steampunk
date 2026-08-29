@@ -256,6 +256,19 @@ func getClient(params *systemParams) (*adt.Client, error) {
 		opts = append(opts, adt.WithInsecureSkipVerify())
 	}
 
+	// SAP_SESSION_TYPE reached the MCP server but not the CLI, so
+	// `SAP_SESSION_TYPE=stateful vsp source edit ...` ran stateless and the
+	// documented workaround for lock-handle/423 errors was unavailable to
+	// exactly the callers most likely to hit them.
+	if v := strings.TrimSpace(os.Getenv("SAP_SESSION_TYPE")); v != "" {
+		switch st := adt.SessionType(strings.ToLower(v)); st {
+		case adt.SessionStateful, adt.SessionStateless, adt.SessionKeep:
+			opts = append(opts, adt.WithSessionType(st))
+		default:
+			fmt.Fprintf(os.Stderr, "[vsp] warning: unknown SAP_SESSION_TYPE %q, using default (stateless)\n", v)
+		}
+	}
+
 	// Browser single sign-on: cookies are fetched on demand and refreshed
 	// automatically, so this is checked before the static cookie sources.
 	if params.UsesSSO() {
