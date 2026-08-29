@@ -327,8 +327,8 @@ func TestDeleteObject_UsesStatefulSession(t *testing.T) {
 // stateful-session regression test — the main methodPathMock already
 // records method+path but throws headers away.
 type headerCaptureMock struct {
-	inner     *methodPathMock
-	captured  []capturedReq
+	inner    *methodPathMock
+	captured []capturedReq
 }
 
 type capturedReq struct {
@@ -597,7 +597,7 @@ func TestLockObject_PassesThroughModificationSupport(t *testing.T) {
       <CORRNR></CORRNR>
       <CORRUSER></CORRUSER>
       <CORRTEXT></CORRTEXT>
-      <IS_LOCAL></IS_LOCAL>
+      <IS_LOCAL>X</IS_LOCAL>
       <IS_LINK_UP></IS_LINK_UP>
       <MODIFICATION_SUPPORT>` + tc.support + `</MODIFICATION_SUPPORT>
     </DATA>
@@ -677,7 +677,6 @@ func TestLockObject_AllowsNoModificationOnReadLock(t *testing.T) {
 		t.Errorf("LockHandle = %q, want HANDLE-X", result.LockHandle)
 	}
 }
-
 
 // TestLockObject_EmitsCorrNr pins the corrNr query parameter that on-premise
 // SAP systems expect when locking an object in a transportable package.

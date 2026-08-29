@@ -55,6 +55,12 @@ type Config struct {
 	// ReauthFunc is called on 401 to re-authenticate (e.g., re-run SAML dance).
 	// Returns fresh cookies for the SAP system. Only used when HasBasicAuth() is false.
 	ReauthFunc func(ctx context.Context) (map[string]string, error)
+
+	// ReauthTimeout caps one re-authentication attempt. Zero uses the default,
+	// which suits a re-auth that runs unattended. Raise it where the flow may
+	// stop to ask a human something — a browser sign-in with a second factor
+	// takes far longer than any machine-to-machine handshake.
+	ReauthTimeout time.Duration
 }
 
 // Option is a functional option for configuring the ADT client.
@@ -218,6 +224,13 @@ func WithReauthFunc(f func(ctx context.Context) (map[string]string, error)) Opti
 	}
 }
 
+// WithReauthTimeout caps a single re-authentication attempt.
+func WithReauthTimeout(d time.Duration) Option {
+	return func(c *Config) {
+		c.ReauthTimeout = d
+	}
+}
+
 // WithTerminalID sets the debugger terminal ID.
 // Use the same ID as SAP GUI to enable cross-tool breakpoint sharing.
 // SAP GUI stores this in: Windows Registry HKCU\Software\SAP\ABAP Debugging\TerminalID
@@ -250,10 +263,22 @@ func (j *httpCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	j.Jar.SetCookies(u, cookies)
 }
 
+// newCookieJar builds the cookie jar every code path must use. Going through
+// here rather than calling cookiejar.New directly is what keeps the Secure
+// stripping alive across a session reset — a plain jar built at a recovery site
+// silently drops the wrapper and reintroduces the lost-session bug on
+// plain-HTTP systems.
+func newCookieJar() http.CookieJar {
+	base, err := cookiejar.New(nil)
+	if err != nil {
+		return nil
+	}
+	return &httpCookieJar{base}
+}
+
 // NewHTTPClient creates an http.Client configured for the given Config.
 func (c *Config) NewHTTPClient() *http.Client {
-	base, _ := cookiejar.New(nil)
-	jar := &httpCookieJar{base}
+	jar := newCookieJar()
 
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment, // Honor HTTP_PROXY/HTTPS_PROXY env vars

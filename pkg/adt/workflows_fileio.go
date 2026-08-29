@@ -12,11 +12,11 @@ import (
 
 // RenameObjectResult contains the result of renaming an object.
 type RenameObjectResult struct {
-	OldName    string `json:"oldName"`
-	NewName    string `json:"newName"`
-	ObjectType string `json:"objectType"`
-	Success    bool   `json:"success"`
-	Message    string `json:"message,omitempty"`
+	OldName    string   `json:"oldName"`
+	NewName    string   `json:"newName"`
+	ObjectType string   `json:"objectType"`
+	Success    bool     `json:"success"`
+	Message    string   `json:"message,omitempty"`
 	Errors     []string `json:"errors,omitempty"`
 }
 
@@ -32,7 +32,22 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		ObjectType: string(objType),
 	}
 
-	oldURL, err := c.buildObjectURL(objType, oldName)
+	// A function module is addressable only under its group, and unlike a
+	// deploy there is no filename to read it from — the caller passes a bare
+	// module name. It does not have to be asked for either: TFDIR maps the
+	// module to its group, which is what ResolveFunctionGroup reads. Without
+	// this both URLs below came back as "function module requires parent
+	// function group name", about a group nobody was ever going to type.
+	parentName := ""
+	if objType == ObjectTypeFunctionMod {
+		group, gerr := c.ResolveFunctionGroup(ctx, oldName)
+		if gerr != nil {
+			return nil, fmt.Errorf("resolving the function group of %s: %w", oldName, gerr)
+		}
+		parentName = group
+	}
+
+	oldURL, err := c.buildObjectURLWithParent(objType, oldName, parentName)
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +102,13 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return result, nil
 	}
 
-	// 4. Write source to new object
-	newURL, _ := c.buildObjectURL(objType, newName)
+	// 4. Write source to new object. Renaming a module does not move it between
+	// groups, so the group resolved above is the new object's too.
+	newURL, urlErr := c.buildObjectURLWithParent(objType, newName, parentName)
+	if urlErr != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("Failed to address the new object: %v", urlErr))
+		return result, nil
+	}
 	lockResult, err := c.LockObject(ctx, newURL, "MODIFY", "")
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to lock new object: %v", err))
@@ -108,9 +128,19 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 	_ = c.UnlockObject(ctx, newURL, lockResult.LockHandle)
 
 	// 5. Activate new object
-	_, err = c.Activate(ctx, newURL, newName)
+	activation, err := c.Activate(ctx, newURL, newName)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("Failed to activate new object: %v", err))
+		return result, nil
+	}
+	// Step 6 deletes the original, and it must not run on the strength of an
+	// activation nobody read. A refusal arrives inside a 200 with the reason in
+	// the body, so looking only at err would delete the object that worked and
+	// keep the copy that does not compile. The copy is left behind, inactive,
+	// for whoever comes to fix it.
+	if !activation.Success {
+		result.Errors = append(result.Errors, activation.ProblemLines()...)
+		result.Message = fmt.Sprintf("%s was created but would not activate, so %s has been left exactly where it was", newName, oldName)
 		return result, nil
 	}
 
@@ -214,6 +244,16 @@ func (c *Client) SaveToFile(ctx context.Context, objType CreatableObjectType, ob
 	result.LineCount = len(strings.Split(source, "\n"))
 
 	// 4. Write to file
+	// Create the directory rather than failing on it. A caller naming an output
+	// directory has said where they want the file; refusing because that
+	// directory does not exist yet turns a one-line call into two, and the error
+	// arrives as a write failure on the object rather than as "make the folder".
+	if dir := filepath.Dir(result.FilePath); dir != "" && dir != "." {
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+			return nil, fmt.Errorf("creating output directory %s: %w", dir, mkErr)
+		}
+	}
+
 	err = os.WriteFile(result.FilePath, []byte(source), 0644)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to write file: %v", err)
@@ -282,6 +322,16 @@ func (c *Client) SaveClassIncludeToFile(ctx context.Context, className string, i
 	result.LineCount = len(strings.Split(source, "\n"))
 
 	// 4. Write to file
+	// Create the directory rather than failing on it. A caller naming an output
+	// directory has said where they want the file; refusing because that
+	// directory does not exist yet turns a one-line call into two, and the error
+	// arrives as a write failure on the object rather than as "make the folder".
+	if dir := filepath.Dir(result.FilePath); dir != "" && dir != "." {
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+			return nil, fmt.Errorf("creating output directory %s: %w", dir, mkErr)
+		}
+	}
+
 	err = os.WriteFile(result.FilePath, []byte(source), 0644)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to write file: %v", err)
