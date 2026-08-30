@@ -196,17 +196,49 @@ Keep these branches alive until the PR is closed.
 
 | PR | Branch | Subject | Status |
 |---|---|---|---|
-| [#120](https://github.com/oisee/vibing-steampunk/pull/120) | `fix/csrf-head-fallback-and-session-type` | CSRF HEAD→GET fallback, secure-cookie fix, `SAP_SESSION_TYPE` | open since 2026-04-23 |
+| ~~[#120](https://github.com/oisee/vibing-steampunk/pull/120)~~ | `fix/csrf-head-fallback-and-session-type` | CSRF HEAD→GET fallback, secure-cookie fix, `SAP_SESSION_TYPE` | **to close** — see *Superseded by upstream* |
 | [#121](https://github.com/oisee/vibing-steampunk/pull/121) | `feat/incl-write-support` | INCL (PROG/I) write support | open since 2026-04-23 |
 | [#126](https://github.com/oisee/vibing-steampunk/pull/126) | `fix/search-type-filter-issue-119` | server-side search type filter | open since 2026-05-01 |
 
 All three are already merged into `main` here. If one stays unanswered for about
 twelve months, close it with a factual pointer to the fork commit.
 
-**Review dates:** module-path trigger check on **2026-10-15** (strategy report,
-section 7 — upstream's six-month code-commit clock started 2026-04-15).
-Close-if-unanswered dates: #120 and #121 on **2027-04-23**, #126 on
-**2027-05-01**.
+### Superseded by upstream
+
+**#120 — close it.** Upstream solved the same problem independently and better,
+and part of our version is now known to be wrong.
+
+- `6b136b7` shipped the HEAD→GET fallback with a 401 **and** 403 short-circuit
+  — the same shape as ours.
+- `ff32cd7` then removed the 403 half as a bug: some systems refuse the HEAD and
+  answer the GET perfectly well, so short-circuiting there reintroduces exactly
+  the unusability the fallback exists to prevent.
+- Our follow-up commit `886a9b2` adds that 403 short-circuit. It is dated after
+  upstream's revert but was written without sight of it.
+
+Upstream's `fetchCSRFTokenWithReauth` / `probeCSRFToken` also carries SSO-redirect
+detection and reauth-on-tokenless-200, which ours never had. The sync takes
+upstream's version whole.
+
+What was genuinely ours in #120 and is **not** upstream: the `httpCookieJar`
+Secure-stripping wrapper and the `SAP_SESSION_TYPE` env var. Both survive in
+`main` and are now pinned by `pkg/adt/fork_corrections_test.go` and
+`internal/mcp/fork_corrections_test.go`. If #120 is reopened in any form, it
+should carry only those two.
+
+**#121 and #126 stay valid.** Upstream's include work (`4dff03f`) is a *read*
+fallback only and never touches the write path; and `SearchObjectByType` /
+`CanonicalObjectType` do not exist upstream at all. Both branches need rebasing
+onto the new `upstream/main` before the PRs will apply cleanly again.
+
+**Review dates:** the module-path trigger is **void as written** (checked
+2026-08-28). It rested on upstream's six-month code-commit clock started
+2026-04-15; upstream has since shipped 341 commits in the week to 2026-08-27,
+so "six months without a code commit" is not going to fire. The other two
+triggers in that clause — our PRs being rejected, or a deliberate hard fork —
+still stand and are the ones to watch.
+Close-if-unanswered dates: #121 on **2027-04-23**, #126 on **2027-05-01**.
+#120 is closed, see below.
 
 ### Pending back-fill
 
@@ -225,7 +257,7 @@ adopted yet.
 
 | PR | Author | Subject | Decision | Reason |
 |---|---|---|---|---|
-| [#108](https://github.com/oisee/vibing-steampunk/pull/108) | dme007 | deploy session ordering, MODIFICATION_SUPPORT | **adopted** 2026-08-03 (`2d4fa5f`) | `1bc5804` shows SAP's `IF_ADT_LOCK_RESULT` documents `NoModification` as `CO_MOD_SUPPORT_NOT_NEEDED`, so the guard from `22517d4` was a false positive on customer-namespace objects. Also brings redirect header preservation and `ICMENOSESSION` recovery, which we lacked. Conflicts: comment-only in `workflows_deploy.go`; in `http.go` both sides kept (our CSRF `HEAD`→`GET` fallback from #120 plus their redirect handling). |
+| [#108](https://github.com/oisee/vibing-steampunk/pull/108) | dme007 | deploy session ordering, MODIFICATION_SUPPORT | **adopted** 2026-08-03 (`2d4fa5f`) | `1bc5804` shows SAP's `IF_ADT_LOCK_RESULT` documents `NoModification` as `CO_MOD_SUPPORT_NOT_NEEDED`, so the guard from `22517d4` was a false positive on customer-namespace objects. Also brings redirect header preservation and `ICMENOSESSION` recovery, which we lacked. Conflicts: comment-only in `workflows_deploy.go`; in `http.go` both sides kept (our CSRF `HEAD`→`GET` fallback from #120 plus their trace helpers and `clearSAPSessionCookies`); their redirect handling is `CheckRedirect` in `pkg/adt/config.go`, not `http.go`. |
 | [#125](https://github.com/oisee/vibing-steampunk/pull/125) | dme007 | skip redundant mutation gate after lock | **superseded** by #108 | same subject area; #108 covers it |
 | [#139](https://github.com/oisee/vibing-steampunk/pull/139) | enricoandreoli | program includes as source-bearing objects | **pending** | collides with our #121 |
 | [#145](https://github.com/oisee/vibing-steampunk/pull/145) | zooloo303 | reuse an object's open transport instead of 409 | **pending** | adjacent to our write paths |
@@ -244,6 +276,69 @@ Deliberately not upstreamed. No PR is owed for these.
 |---|---|---|
 | `d752536` | CHANGELOG for v3.0.0 | our own version line |
 | `3f7a90c` | goreleaser release target → `frd1201` | must not point upstream releases at this fork |
+
+---
+
+## Upstream syncs
+
+| Sync | Upstream head | Scope | Notes |
+|---|---|---|---|
+| `sync/upstream-2026-08` | `9b8789d` (2026-08-27) | 341 commits, 314 files, +52,440 | 13 conflicts. Upstream had independently built several of our fixes, so most resolutions were a choice between two implementations rather than a combination — upstream won wherever the effect was the same. Three defects would have merged in silently: a new upstream file calling the three-arg `LockObject` (broke `go build`), a duplicate jar-reset that discarded the `httpCookieJar` wrapper, and unreachable code that `go vet` rejects. |
+
+**What made this sync survivable** was writing the missing tests *first*. Eleven
+of sixteen fork corrections had no test at all, so the merge had no acceptance
+criterion until `fork_corrections_test.go` existed in `pkg/adt/` and
+`internal/mcp/`. Do that again before the next large sync: a correction with no
+test is a correction the merge can delete in silence.
+
+## Known issues — found, not fixed
+
+Both came out of the post-merge review on 2026-08-28. Neither was introduced by
+the sync: they predate it here **and** exist in `upstream/main` unchanged, so
+each is a candidate for an upstream PR rather than a fork-only patch. Recorded
+here so the next person does not have to rediscover them.
+
+### 1. `retryRequest` does not reconcile the session it just renewed
+
+`pkg/adt/http.go:331`. `Request()` reads three things back off every response:
+`adoptServerCookies` (`:238`), the CSRF token (`:265`) and the session id
+(`:270`). `retryRequest` reads back **none** of them.
+
+That matters because of *when* it runs. Its four callers (`:249`, `:260`,
+`:296`, `:317`) are the CSRF-refresh-on-403 path, the session-expiry recovery
+and the SSO re-auth — precisely the moments SAP issues a fresh
+`SAP_SESSIONID`. After the retry the jar holds the new session id while
+`config.Cookies` still holds the dead one; the next `addCookies` sends both
+under the same name, the server honours one of them, and the cached CSRF token
+belongs to the other. The caller is told its token is invalid.
+
+Upstream's own commit for `adoptServerCookies` — `b9c22f3` *"take the session
+id SAP reissues, instead of sending two"* — describes exactly this failure. The
+fix was added to `Request()` and not to `retryRequest`, so the gap between the
+two paths grew by one step at the sync; the omission itself is older than that.
+
+**Shape of the fix:** have `retryRequest` do what `Request()` does after
+reading the body — `adoptServerCookies(resp)`, then store a returned CSRF token
+and session id. Small and testable with `httptest`: serve a retry response
+carrying a new `SAP_SESSIONID` and a new `X-CSRF-Token`, then assert the next
+request sends one session id and the new token. While there, note that
+`retryRequest` re-sets the session-type header itself right after
+`setDefaultHeaders` has already done it — a second copy of that logic which
+does not know about `SessionKeep`.
+
+**Why no PR yet:** deliberately parked 2026-08-28. It is upstream-worthy (rule
+1 — branch off `upstream/main`, not `main`), so when it is picked up it should
+go through Workflow A rather than being patched here first.
+
+### 2. Unsynchronised jar swap on a shared `http.Client`
+
+`clearSAPSessionCookies` (`pkg/adt/http.go:641`) assigns `hc.Jar` while other
+goroutines may be inside `httpClient.Do` reading `c.Jar`. `cmd/vsp/fetchsources.go:93`
+fans several goroutines out over one `*adt.Client`, and the MCP server serves
+concurrent tool calls on one client too, so the race is reachable — the session
+expiry path at `:296` is not covered by `reauthMu`. Detectable under
+`go test -race`. A fix needs to decide what the concurrency contract of
+`Transport` actually is, which is why it is not a quick patch.
 
 ---
 
@@ -300,10 +395,15 @@ want the sqlite tests locally.
 `go.mod` stays on `github.com/oisee/vibing-steampunk`. Move it to a fork-owned
 path in a single commit if any of these happens:
 
-- upstream goes **six months without a code commit** — the clock started
-  2026-04-15, so **check on 2026-10-15**; or
-- our upstream PRs are rejected; or
+- ~~upstream goes **six months without a code commit** — the clock started
+  2026-04-15, so **check on 2026-10-15**~~ — **void, checked 2026-08-28.**
+  Upstream shipped 341 commits in the week to 2026-08-27. Dormancy is not the
+  scenario to plan for; keeping up with an active upstream is; or
+- our upstream PRs are rejected — the live one. #120 is being closed as
+  superseded, which is not a rejection, but two of three remain unanswered
+  since April; or
 - we deliberately decide to hard-fork.
 
 Cost of the move: 104 files (73 of them Go), plus a permanent merge tax on every
-upstream sync.
+upstream sync — and that tax is now measurably higher than when this was
+written, since upstream is moving fast enough for the fork to need real syncs.

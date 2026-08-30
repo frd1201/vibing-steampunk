@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,24 @@ const (
 	// SessionKeep uses existing session if available, otherwise stateless.
 	SessionKeep SessionType = "keep"
 )
+
+// ParseSessionType turns a SAP_SESSION_TYPE value into a SessionType, reporting
+// whether it was one of the three known names. Surrounding whitespace and case
+// are ignored; an empty value is not an error, it simply means "unset" and
+// returns ok == false with the zero SessionType.
+//
+// One parser, because there were two: the MCP server compared the raw string
+// while the CLI lower-cased and trimmed it, so SAP_SESSION_TYPE=Stateful — or a
+// value with a trailing space out of a .env file — took effect on one side of
+// the same product and was warned away on the other.
+func ParseSessionType(v string) (SessionType, bool) {
+	switch st := SessionType(strings.ToLower(strings.TrimSpace(v))); st {
+	case SessionStateful, SessionStateless, SessionKeep:
+		return st, true
+	default:
+		return "", false
+	}
+}
 
 // Config holds the configuration for an ADT client connection.
 type Config struct {
@@ -55,6 +74,12 @@ type Config struct {
 	// ReauthFunc is called on 401 to re-authenticate (e.g., re-run SAML dance).
 	// Returns fresh cookies for the SAP system. Only used when HasBasicAuth() is false.
 	ReauthFunc func(ctx context.Context) (map[string]string, error)
+
+	// ReauthTimeout caps one re-authentication attempt. Zero uses the default,
+	// which suits a re-auth that runs unattended. Raise it where the flow may
+	// stop to ask a human something — a browser sign-in with a second factor
+	// takes far longer than any machine-to-machine handshake.
+	ReauthTimeout time.Duration
 }
 
 // Option is a functional option for configuring the ADT client.
@@ -218,6 +243,13 @@ func WithReauthFunc(f func(ctx context.Context) (map[string]string, error)) Opti
 	}
 }
 
+// WithReauthTimeout caps a single re-authentication attempt.
+func WithReauthTimeout(d time.Duration) Option {
+	return func(c *Config) {
+		c.ReauthTimeout = d
+	}
+}
+
 // WithTerminalID sets the debugger terminal ID.
 // Use the same ID as SAP GUI to enable cross-tool breakpoint sharing.
 // SAP GUI stores this in: Windows Registry HKCU\Software\SAP\ABAP Debugging\TerminalID
@@ -250,10 +282,22 @@ func (j *httpCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	j.Jar.SetCookies(u, cookies)
 }
 
+// newCookieJar builds the cookie jar every code path must use. Going through
+// here rather than calling cookiejar.New directly is what keeps the Secure
+// stripping alive across a session reset — a plain jar built at a recovery site
+// silently drops the wrapper and reintroduces the lost-session bug on
+// plain-HTTP systems.
+func newCookieJar() http.CookieJar {
+	base, err := cookiejar.New(nil)
+	if err != nil {
+		return nil
+	}
+	return &httpCookieJar{base}
+}
+
 // NewHTTPClient creates an http.Client configured for the given Config.
 func (c *Config) NewHTTPClient() *http.Client {
-	base, _ := cookiejar.New(nil)
-	jar := &httpCookieJar{base}
+	jar := newCookieJar()
 
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment, // Honor HTTP_PROXY/HTTPS_PROXY env vars
@@ -285,21 +329,72 @@ func (c *Config) NewHTTPClient() *http.Client {
 	//     goes missing across a redirect, the second hop hits SAP with a
 	//     fresh (stateless) session-type or a missing CSRF token, and the
 	//     lock handle / mutation is rejected.
+	// Only for hops that stay on the SAP host. Re-attaching unconditionally
+	// sent Basic credentials and the session CSRF token to whatever host the
+	// chain led to — and an expired session on an SSO system leads to the
+	// identity provider, which is why redirectedAwayFromSAP exists.
+	//
+	// Off-host the headers are DELETED, not merely left unset. Go's own
+	// makeHeadersCopier runs before CheckRedirect and copies every header that
+	// is not on its sensitive list — Authorization, Www-Authenticate, Cookie
+	// and Cookie2 are stripped cross-origin, X-CSRF-Token and
+	// X-sap-adt-sessiontype are not. So declining to *set* them here left the
+	// session's CSRF token going to the identity provider exactly as before;
+	// only an explicit Del actually stops it.
+	//
+	// The other half of that ordering is why the same-host branch is nearly a
+	// no-op: Go already preserves Authorization for a same-host or subdomain
+	// hop, so the re-attach only ever added anything cross-origin — which is
+	// now refused. A BTP SAML flow that genuinely needs Authorization on a
+	// foreign host (issue #90's abap → abap-web hop) therefore no longer gets
+	// it, and would need an explicit, named allowance for that one host rather
+	// than a blanket "any host in the chain".
+	//
+	// The comparison is on the *hostname*, case-folded — not on host:port.
+	// Two reasons, and they pull the same way:
+	//   - `==` on the raw host made an ICM redirect that merely changed the
+	//     case of the FQDN, or spelled out :443, look foreign, and the headers
+	//     this handler exists to preserve were dropped on an intra-SAP hop.
+	//   - the Del below must not be stricter than Go's own rule, which ignores
+	//     the port entirely (shouldCopyHeaderOnRedirect compares hostnames).
+	//     A box that answers on 44300 and redirects to 8443 is one machine;
+	//     deleting Basic credentials there would break a hop that worked
+	//     before this handler existed.
+	// redirectedAwayFromSAP (http.go) compares host:port with EqualFold, so it
+	// is stricter on the port and identical on case; the difference only shows
+	// on a port-changing hop, where this predicate is deliberately the looser
+	// of the two.
+	sapHostname := ""
+	if u, err := url.Parse(c.BaseURL); err == nil {
+		sapHostname = u.Hostname()
+	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
 		}
-		if len(via) > 0 {
-			first := via[0]
-			if auth := first.Header.Get("Authorization"); auth != "" {
-				req.Header.Set("Authorization", auth)
-			}
-			if csrf := first.Header.Get("X-CSRF-Token"); csrf != "" {
-				req.Header.Set("X-CSRF-Token", csrf)
-			}
-			if st := first.Header.Get("X-sap-adt-sessiontype"); st != "" {
-				req.Header.Set("X-sap-adt-sessiontype", st)
-			}
+		if len(via) == 0 {
+			return nil
+		}
+		// An unparseable or scheme-less BaseURL leaves sapHostname empty. Treat
+		// that as "not the SAP host" so the credentials-off-host rule holds;
+		// the alternative is to silently disable the whole handler.
+		onSAPHost := sapHostname != "" &&
+			strings.EqualFold(req.URL.Hostname(), sapHostname)
+		if !onSAPHost {
+			req.Header.Del("Authorization")
+			req.Header.Del("X-CSRF-Token")
+			req.Header.Del("X-sap-adt-sessiontype")
+			return nil
+		}
+		first := via[0]
+		if auth := first.Header.Get("Authorization"); auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		if csrf := first.Header.Get("X-CSRF-Token"); csrf != "" {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		if st := first.Header.Get("X-sap-adt-sessiontype"); st != "" {
+			req.Header.Set("X-sap-adt-sessiontype", st)
 		}
 		return nil
 	}

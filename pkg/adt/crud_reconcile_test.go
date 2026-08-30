@@ -34,6 +34,10 @@ type recordedCall struct {
 	method string
 	path   string
 	query  string
+	// header is the outgoing request's headers. Recorded because the
+	// lock-handle bug class (issue #88) is decided entirely by
+	// X-sap-adt-sessiontype, which method/path/query cannot show.
+	header http.Header
 }
 
 func (m *methodPathMock) Do(req *http.Request) (*http.Response, error) {
@@ -41,6 +45,7 @@ func (m *methodPathMock) Do(req *http.Request) (*http.Response, error) {
 		method: req.Method,
 		path:   req.URL.Path,
 		query:  req.URL.RawQuery,
+		header: req.Header.Clone(),
 	})
 	for _, r := range m.routes {
 		if r.method != "" && r.method != req.Method {
@@ -327,8 +332,8 @@ func TestDeleteObject_UsesStatefulSession(t *testing.T) {
 // stateful-session regression test — the main methodPathMock already
 // records method+path but throws headers away.
 type headerCaptureMock struct {
-	inner     *methodPathMock
-	captured  []capturedReq
+	inner    *methodPathMock
+	captured []capturedReq
 }
 
 type capturedReq struct {
@@ -597,7 +602,7 @@ func TestLockObject_PassesThroughModificationSupport(t *testing.T) {
       <CORRNR></CORRNR>
       <CORRUSER></CORRUSER>
       <CORRTEXT></CORRTEXT>
-      <IS_LOCAL></IS_LOCAL>
+      <IS_LOCAL>X</IS_LOCAL>
       <IS_LINK_UP></IS_LINK_UP>
       <MODIFICATION_SUPPORT>` + tc.support + `</MODIFICATION_SUPPORT>
     </DATA>
@@ -678,6 +683,50 @@ func TestLockObject_AllowsNoModificationOnReadLock(t *testing.T) {
 	}
 }
 
+// TestLockObject_RejectsLockWithoutHandle keeps the genuinely unusable case
+// covered: a LOCK that comes back without a handle leaves nothing to write with
+// and nothing to release, so it must fail at the LOCK call with an actionable
+// message rather than at a confusing 423 InvalidLockHandle seconds later.
+//
+// Restored after the 2026-08 upstream sync: the merge resolved this file in
+// favour of the fork's table-driven ModificationSupport test and took upstream's
+// version of this one with it, leaving the empty-LOCK_HANDLE guard in crud.go —
+// which CLAUDE.md names as the surviving half of issue #88 — with no test at
+// all. FORK.md's own rule: a correction with no test is a correction the next
+// merge can delete in silence.
+func TestLockObject_RejectsLockWithoutHandle(t *testing.T) {
+	const noHandleLockXML = `<?xml version="1.0" encoding="UTF-8"?>
+<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+  <asx:values>
+    <DATA>
+      <LOCK_HANDLE></LOCK_HANDLE>
+      <MODIFICATION_SUPPORT>NoModification</MODIFICATION_SUPPORT>
+    </DATA>
+  </asx:values>
+</asx:abap>`
+	mock := &methodPathMock{
+		routes: []routedResponse{
+			resp("", "discovery", 200, "ok"),
+			resp(http.MethodPost, "/oo/classes/ZCL_DEMO_NOHANDLE", 200, noHandleLockXML),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+
+	_, err := client.LockObject(
+		context.Background(),
+		"/sap/bc/adt/oo/classes/ZCL_DEMO_NOHANDLE",
+		"MODIFY",
+		"",
+	)
+	if err == nil {
+		t.Fatal("LockObject accepted a LOCK with no lock handle; the write that " +
+			"follows can only fail with 423 InvalidLockHandle")
+	}
+	if !strings.Contains(err.Error(), "no lock handle") {
+		t.Errorf("error = %v, want it to name the missing lock handle", err)
+	}
+}
 
 // TestLockObject_EmitsCorrNr pins the corrNr query parameter that on-premise
 // SAP systems expect when locking an object in a transportable package.

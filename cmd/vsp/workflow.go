@@ -252,6 +252,15 @@ func createADTClient() *adt.Client {
 		opts = append(opts, adt.WithCookies(cfg.Cookies))
 	}
 
+	// SAP_SESSION_TYPE reaches cfg at cmd/vsp/main.go, and the MCP server and
+	// getClient both act on it — this builder did not, so `vsp lua`, `vsp lsp`,
+	// `vsp debug` and `vsp workflow` ran stateless no matter what the user set,
+	// with no diagnostic, which is the documented workaround for the 423
+	// lock-handle class being unavailable on four of the surfaces that hit it.
+	if st, ok := adt.ParseSessionType(cfg.SessionType); ok {
+		opts = append(opts, adt.WithSessionType(st))
+	}
+
 	return adt.NewClient(cfg.BaseURL, cfg.Username, cfg.Password, opts...)
 }
 

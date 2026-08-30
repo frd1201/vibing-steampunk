@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.0.0] - 2026-06-22
 ### Bug Fixes
 
+- **adt:** CSRF HEAD→GET fallback + SAP_SESSION_TYPE env var ([`29a257b`](https://github.com/oisee/vibing-steampunk/commit/29a257b284639ec996c213178473b9926f9dae90))
+- **adt:** Extract INCL name from filename; move SyntaxCheck before Lock ([`8f6c030`](https://github.com/oisee/vibing-steampunk/commit/8f6c030c7ffc5ac197c32b00b489adcc886bdd70))
+- **search:** Server-side type filter so --max applies after --type ([`f1f71d5`](https://github.com/oisee/vibing-steampunk/commit/f1f71d567f1b98aae155da8234d0bb1e06d40132))
+- **search:** Pass --type to ADT server-side so --max applies after type filter ([`5ddb308`](https://github.com/oisee/vibing-steampunk/commit/5ddb3080c7abea624e1e44fa6259492c243c048a))
+- **search:** Add TODO for INCL canonical type pending upstream PR #121 ([`8112729`](https://github.com/oisee/vibing-steampunk/commit/8112729844863190abfeb3bd63cbc9c510c0f804))
+- **search:** Wire MCP path + move CanonicalObjectType to adt (PR #126 review) ([`569e39f`](https://github.com/oisee/vibing-steampunk/commit/569e39fc845b859ddefee6f8cb4ed7714a426fc7))
+
+### Features
+
+- **adt:** Add INCL (PROG/I) write support for WriteSource, EditSource, CLI ([`bf3b569`](https://github.com/oisee/vibing-steampunk/commit/bf3b56944cda2eac22075eca62a07c9827f199d7))
+
+> **Withdrawn from this release line:** `886a9b2` ("Skip CSRF GET fallback on
+> 401/403") is not carried forward. Upstream shipped the same short-circuit in
+> `6b136b7` and then removed the 403 half in `ff32cd7` as a bug: some systems
+> refuse the HEAD and answer the GET perfectly well, so short-circuiting on 403
+> reintroduces the unusability the fallback exists to prevent. Upstream's
+> `fetchCSRFTokenWithReauth` is used instead.
+
+## [2.42.0] - 2026-08-22
+### Bug Fixes
+
+- **adt:** Check syntax before locking, and let a forbidden HEAD fall back to GET ([`ff32cd7`](https://github.com/oisee/vibing-steampunk/commit/ff32cd713a26507f79569a0988edece5e24df83a))
+- **cli:** A read_only system must be read-only on the command line too ([`b9769d4`](https://github.com/oisee/vibing-steampunk/commit/b9769d490a83430c086bb7029c2d8fd79651d087))
+- **install:** Refuse an embedded archive that is empty instead of deploying nothing ([`a9db9eb`](https://github.com/oisee/vibing-steampunk/commit/a9db9eb1e4e792f41143b97e223c85a5c4a84492))
+- **adt:** Stop reading NoModification as read-only, and stop leaking the lock ([`9b98997`](https://github.com/oisee/vibing-steampunk/commit/9b9899703cccf76b570914d8020e8fdd44237707))
+- **http:** Recover a browser session that expires without a 401 ([`e66bc18`](https://github.com/oisee/vibing-steampunk/commit/e66bc183ece3d40ed1f67af6060cb0dca084b603))
+- **cli:** Let a system declare its transport safety, so the transport commands can run ([`ae5f684`](https://github.com/oisee/vibing-steampunk/commit/ae5f684228a548ac71c39cffe9f7b90e52b517b6))
+- **mcp:** Say what the call is missing instead of that the action does not exist ([`8a5670b`](https://github.com/oisee/vibing-steampunk/commit/8a5670bfff9be850ef465bacca030d95e0a2d8ea))
+- **abap:** Let the git service compile against either abapGit release ([`64560a1`](https://github.com/oisee/vibing-steampunk/commit/64560a15aea7cfe51128d84c07843ea2c7713693))
+- **make:** Install wrote to /bin, and add a link target for development ([`ff88b00`](https://github.com/oisee/vibing-steampunk/commit/ff88b0065deb34ad5c7a02507ba3bc306618a91a))
+- **http:** Take the session id SAP reissues, instead of sending two ([`b9c22f3`](https://github.com/oisee/vibing-steampunk/commit/b9c22f3fb4417a149ce819447a86763959444505))
+- **make:** Build the platform-named binary, and link build/vsp at it ([`cd8f550`](https://github.com/oisee/vibing-steampunk/commit/cd8f550704357aeeb66d0aa307660d1b877bb7f3))
+- **landscape:** Find and read what SAP GUI for Java writes ([`56505cb`](https://github.com/oisee/vibing-steampunk/commit/56505cb15e9b6821631f4192084c100cecb5d31e))
+- **adt:** Return the modules of a function group, on old releases too ([`e76c5f5`](https://github.com/oisee/vibing-steampunk/commit/e76c5f51ac1308ff4337c9a23514353d929910fe))
+- **landscape:** Stop inventing hosts, and address systems the way they answer ([`9fd0421`](https://github.com/oisee/vibing-steampunk/commit/9fd042191606c2ece2686e478ce01f1f6fbe6619))
+- Publish the tool counts the server actually registers, and pin them ([`4f78dcb`](https://github.com/oisee/vibing-steampunk/commit/4f78dcb471c148d5fbc9c0037f19db323431b138))
+- **test:** Drop a discarded fmt.Sprint that vet rejects ([`915f5d2`](https://github.com/oisee/vibing-steampunk/commit/915f5d2b92727ab3f393cb825d8e39b113ca5751))
+
+
+### Features
+
+- **saprfc:** A password that refuses to print, and auth acceptance criteria ([`6884161`](https://github.com/oisee/vibing-steampunk/commit/6884161bea1bcaf2e1893362f7eb518b04b912ae))
+- **adt:** The debugger over plain HTTPS, for systems with no RFC channel ([`89542ef`](https://github.com/oisee/vibing-steampunk/commit/89542ef87028627d24d5c01077bf04fdfd9fbd0e))
+- **debug:** Read debugger variables over the ADT tunnel ([`5392864`](https://github.com/oisee/vibing-steampunk/commit/539286469e705fe8c1890bb0bcc59124d3aea7c3))
+- **debug:** A typed variable model, and two bugs the transports hid ([`2460c9b`](https://github.com/oisee/vibing-steampunk/commit/2460c9bd29aad97b8ee7ee1b1245f9687cfc7096))
+- **debug:** Breakpoints through ADT, so the debugger needs no Z code at all ([`01640c3`](https://github.com/oisee/vibing-steampunk/commit/01640c3b0e1ca66696193f0ee5751656f501945f))
+- **mcp:** The debugger tools work, and are enabled by default again ([`1d94300`](https://github.com/oisee/vibing-steampunk/commit/1d943009ff3566a4cfd23829812cd045b9d3feb1))
+- **trace:** The measured call tree, over either transport ([`13cc062`](https://github.com/oisee/vibing-steampunk/commit/13cc0621de1ad81847138cfad795065576315823))
+- **debug:** Keep customer code the default, and report the lines SAP refused ([`db08ea4`](https://github.com/oisee/vibing-steampunk/commit/db08ea4452c76e119ef0ba887cda7f59f80fc791))
+- **trace:** Record a unit statement by statement, with its values ([`bc88bfc`](https://github.com/oisee/vibing-steampunk/commit/bc88bfc0d1434f6ad780fd3f569a513771c46941))
+- **debug:** Write variables, and move between stack frames ([`f469af7`](https://github.com/oisee/vibing-steampunk/commit/f469af7ea0696d615fcf2249878bb3bfd9f7fb56))
+- **lua:** One debug session for the whole script, and one API instead of two ([`4c6fbb3`](https://github.com/oisee/vibing-steampunk/commit/4c6fbb3ffd53cbc9b5b2f40c3fde56f3174abb8e))
+- **adt:** Create RFC-enabled function modules, no SE37 shell needed ([`3f948e4`](https://github.com/oisee/vibing-steampunk/commit/3f948e4d6c5d61d395629e29d12f932f5e4be658))
+- **auth:** Browser SSO that keeps its own session ([`26ce707`](https://github.com/oisee/vibing-steampunk/commit/26ce7076d64d6e4795dccd41dcd7b32ba2b1bc2f))
+- **adt:** Edit a function module in one call, and read one without its group ([`cf39e41`](https://github.com/oisee/vibing-steampunk/commit/cf39e413d42d4de4aa1f55a1f66d401e8e834224))
+- **ws:** Authenticate the WebSocket transport with a browser session ([`feb6cda`](https://github.com/oisee/vibing-steampunk/commit/feb6cda034cdf41210fbbc98625be1b66622bc61))
+- **landscape:** Read the systems SAP GUI already knows about ([`88a9273`](https://github.com/oisee/vibing-steampunk/commit/88a9273d8abf63a8163d89683f01e3478faa0473))
+- **landscape:** Find every landscape this machine can reach, VMs included ([`4396051`](https://github.com/oisee/vibing-steampunk/commit/4396051757639107a4a3dd8cf0ecc336235ddfae))
+- **compat:** Ask a system what it supports, and how to route each capability ([`4894713`](https://github.com/oisee/vibing-steampunk/commit/4894713a8cd99d615d3ad8bbb9351f3606a264f3))
+- **detect:** Find the port a system serves ADT on, before configuring it ([`571f198`](https://github.com/oisee/vibing-steampunk/commit/571f1989bab6565f539a2daa2d212f32dc423973))
+- **detect:** --all sweeps every port, and the instance shapes the shortlist ([`05a7930`](https://github.com/oisee/vibing-steampunk/commit/05a79304723e5273e7ca6f1a3057c25a83ae1b5c))
+- **detect:** Prefer TLS, and follow the name a certificate points at ([`3211cce`](https://github.com/oisee/vibing-steampunk/commit/3211cce2db925b24cc149909d8e4355c7a11c235))
+- **detect:** Print both config templates, and say which one to take ([`7d15030`](https://github.com/oisee/vibing-steampunk/commit/7d15030272603c4ad85a4d1bfabe47c99ab7ac51))
+
+
+
+## [2.41.0] - 2026-08-21
+### Bug Fixes
+
+- **rfc:** WHERE splitting, wide-table fallback, one shared ReadTable ([`9528ba1`](https://github.com/oisee/vibing-steampunk/commit/9528ba1d9ed97b48bd199eac7129390953db40ab))
+- **mcp:** Authenticate the HTTP transport; gate live tests; add the agenda ([`b4f6ffe`](https://github.com/oisee/vibing-steampunk/commit/b4f6ffe1afd6841d8dd819596116e2ba7adff2d7))
+- **mcp:** Ping the idle RFC connection every minute ([`4930926`](https://github.com/oisee/vibing-steampunk/commit/4930926db3a7c81c53d73452607067d68e2c9ddb))
+- **adt:** CSRF GET fallback and proxy-aware WebSocket dialing ([`6b136b7`](https://github.com/oisee/vibing-steampunk/commit/6b136b7a9b36959a5d87dff96f013acb55ffc4b0))
+- **adt,mcp:** Message classes are writable again; ship the Apache notice ([`4a9e01f`](https://github.com/oisee/vibing-steampunk/commit/4a9e01f0a9c1d6776e707ccd45e6baeaee0faee0))
+- **debug:** A breakpoint inside a function module needs its include ([`7b8d518`](https://github.com/oisee/vibing-steampunk/commit/7b8d5181b84ecdcb4814d9916e5ced18b4f7ed35))
+- **debug:** Attach must activate external debugging for its own session ([`a40156b`](https://github.com/oisee/vibing-steampunk/commit/a40156bb244c5b2eebde098827e126046dd12d57))
+- **debug:** Read the stop location TPDAPI actually sends ([`698a6e4`](https://github.com/oisee/vibing-steampunk/commit/698a6e4094b033be4eb6c6c7cba4318ea5866b30))
+- **debug:** Project the stack instead of serialising TPDAPI's own table ([`f787d01`](https://github.com/oisee/vibing-steampunk/commit/f787d013bffa268364fc1aa52b04dc27a8b4fe2c))
+- **debug:** A closed conversation is how detach succeeds ([`520f854`](https://github.com/oisee/vibing-steampunk/commit/520f85461c7372b9c21b76f59f6de8e4ed7fbf4d))
+- **debug:** The adt command must send headers ([`5b32cd3`](https://github.com/oisee/vibing-steampunk/commit/5b32cd3087ba916af2aab37205a14865b8123028))
+- **debug:** Detach sweeps a stale listener even from a fresh session ([`efb1135`](https://github.com/oisee/vibing-steampunk/commit/efb1135534a9103cedad1557a7361826716f8bc0))
+- **adt:** Send an Accept header through the RFC tunnel ([`f95098e`](https://github.com/oisee/vibing-steampunk/commit/f95098e5514b9f9fc89d0248207024bbe0597b87))
+- **adt:** Default Accept to */* , not a concrete type ([`d6a208a`](https://github.com/oisee/vibing-steampunk/commit/d6a208acb5185b581cdd818d9f9135c3a7d41024))
+
+
+### Features
+
+- **rfc:** Vsp rfc probe — fingerprint a system, including what the user may call ([`6169305`](https://github.com/oisee/vibing-steampunk/commit/61693054f12efad18e4acb301f40abb718fbede8))
+- **rfc:** Vsp rfc export — abapGit ZIP in one call ([`60aacbf`](https://github.com/oisee/vibing-steampunk/commit/60aacbfe33d338ef769be8c6f6f298ad01ea68e6))
+- **rfc:** Run reports as background jobs, and read job spools ([`eef5f81`](https://github.com/oisee/vibing-steampunk/commit/eef5f814eb61f9dadae0f3f96a4ceeff5cc005fd))
+- **rfc:** ADT REST over the classic-RFC tunnel — `vsp rfc adt` ([`676ebe3`](https://github.com/oisee/vibing-steampunk/commit/676ebe39b5c1bbc6a4e6d8ace61140a00b6f0170))
+- **rfc:** The debugger's read half, and the ZADT_DEBUG facade source ([`45298ad`](https://github.com/oisee/vibing-steampunk/commit/45298adc4b9e81d5e76c8a044e125d6326f3c6f1))
+- **abap:** ZADT_DEBUG facade over TPDAPI, deployed to A4H ([`a4552e5`](https://github.com/oisee/vibing-steampunk/commit/a4552e57c94212dfea90614302f16bb6ffaea97d))
+- **rfc:** Drive the ABAP debugger over a pinned session ([`5837e73`](https://github.com/oisee/vibing-steampunk/commit/5837e73089a3b5df352d72a5afc4a0745db8c92c))
+- **debug:** Catch — listen and attach on the same pinned session ([`f555b7f`](https://github.com/oisee/vibing-steampunk/commit/f555b7ffa2e6e64e0aac5ab88ebb9ded67505137))
+- **rfc:** Tunnel ADT REST through the pinned debug session ([`d1e407c`](https://github.com/oisee/vibing-steampunk/commit/d1e407ca125f110b4fdb010457e3a984cb1c9dcb))
+- **debug:** Drive SAP's own ADT debugger over the RFC tunnel ([`6a7c6ed`](https://github.com/oisee/vibing-steampunk/commit/6a7c6ed9b49751c42beda7d5b431625272f06e51))
+- **debug:** A body for adt requests, from a file ([`0bbc94f`](https://github.com/oisee/vibing-steampunk/commit/0bbc94fefdc9142a98130b8c6dfe87f81e331c9d))
+
+
+
+## [2.40.0] - 2026-08-20
+### Bug Fixes
+
 - Health tests signal now scans full package hierarchy ([`9ebc9db`](https://github.com/oisee/vibing-steampunk/commit/9ebc9db969689ce812e03218ef33dc8a84d011f0))
 - Health report filename uses _ for $ prefix in package names ([`a2bccfe`](https://github.com/oisee/vibing-steampunk/commit/a2bccfe83044d360e2523a62e1edfa15a99e7fdd))
 - Pad progress lines with %-40s to prevent display artifacts ([`13ebb80`](https://github.com/oisee/vibing-steampunk/commit/13ebb803704159408355b60e67a95d6f60822b4d))
@@ -30,13 +134,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two high defects from f6b1726 review + statement-order literal scope ([`afbc19d`](https://github.com/oisee/vibing-steampunk/commit/afbc19dc0f3e74ed89dd0eb71c344a1b3a0a8adc))
 - **saml:** Address PR #97 review follow-up notes ([`87ce9c7`](https://github.com/oisee/vibing-steampunk/commit/87ce9c76929619e695371717e96a913f6e274ce4))
 - **adt:** Close the lock-handle bug class — Stateful + ModificationSupport guard ([`22517d4`](https://github.com/oisee/vibing-steampunk/commit/22517d46241852f473e619eeeb6a5fd827305a70))
-- **adt:** CSRF HEAD→GET fallback + SAP_SESSION_TYPE env var ([`29a257b`](https://github.com/oisee/vibing-steampunk/commit/29a257b284639ec996c213178473b9926f9dae90))
-- **adt:** Extract INCL name from filename; move SyntaxCheck before Lock ([`8f6c030`](https://github.com/oisee/vibing-steampunk/commit/8f6c030c7ffc5ac197c32b00b489adcc886bdd70))
-- **search:** Server-side type filter so --max applies after --type ([`f1f71d5`](https://github.com/oisee/vibing-steampunk/commit/f1f71d567f1b98aae155da8234d0bb1e06d40132))
-- **search:** Pass --type to ADT server-side so --max applies after type filter ([`5ddb308`](https://github.com/oisee/vibing-steampunk/commit/5ddb3080c7abea624e1e44fa6259492c243c048a))
-- **search:** Add TODO for INCL canonical type pending upstream PR #121 ([`8112729`](https://github.com/oisee/vibing-steampunk/commit/8112729844863190abfeb3bd63cbc9c510c0f804))
-- **search:** Wire MCP path + move CanonicalObjectType to adt (PR #126 review) ([`569e39f`](https://github.com/oisee/vibing-steampunk/commit/569e39fc845b859ddefee6f8cb4ed7714a426fc7))
-- **adt:** Skip CSRF GET fallback on 401/403 auth failures (PR #120 review) ([`886a9b2`](https://github.com/oisee/vibing-steampunk/commit/886a9b254f5a674b02e5fe96a4d43168675931e5))
 
 
 ### Features
@@ -71,7 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli:** Vsp recover-failed-create — CLI wrapper for the recovery primitive ([`1b05441`](https://github.com/oisee/vibing-steampunk/commit/1b054417e2563e5600b0cd79e30c55fd252591aa))
 - **cr-audit:** Classify orphans by DDIC delivery class ([`4b5b0e9`](https://github.com/oisee/vibing-steampunk/commit/4b5b0e9e67099ed9ad4ae79826a6fdb4bbef57ec))
 - **cr-audit:** Treat DOMA in CR as implicit cover for its FIXVAL node ([`ce1f191`](https://github.com/oisee/vibing-steampunk/commit/ce1f1919026ba3f7af83de69c20fc539f9ab3eb1))
-- **adt:** Add INCL (PROG/I) write support for WriteSource, EditSource, CLI ([`bf3b569`](https://github.com/oisee/vibing-steampunk/commit/bf3b56944cda2eac22075eca62a07c9827f199d7))
+- **rfc:** Call SAP function modules over classic RFC (vsp rfc …) ([`d4e51ea`](https://github.com/oisee/vibing-steampunk/commit/d4e51ead6a1570b53d96a886b1f38032b1aa6092))
+- **mcp:** Classic RFC as an action of the universal SAP tool ([`2f79046`](https://github.com/oisee/vibing-steampunk/commit/2f79046d62dc89da2e390fb56cbcf36b364175dc))
 
 
 ### Performance

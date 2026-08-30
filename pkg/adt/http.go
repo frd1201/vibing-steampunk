@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -200,9 +199,6 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 		req.SetBasicAuth(t.config.Username, t.config.Password)
 	}
 
-	// Add user-provided cookies for cookie-based authentication
-	t.addCookies(req)
-
 	// Set default headers
 	t.setDefaultHeaders(req, opts)
 
@@ -211,13 +207,19 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 		token := t.getCSRFToken()
 		if token == "" {
 			// Fetch CSRF token first
-			if err := t.fetchCSRFToken(ctx); err != nil {
+			if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
 				return nil, fmt.Errorf("fetching CSRF token: %w", err)
 			}
 			token = t.getCSRFToken()
 		}
 		req.Header.Set("X-CSRF-Token", token)
 	}
+
+	// Attach cookies last. Fetching a token can end up re-authenticating, and a
+	// token belongs to the session it was minted for: pairing a fresh one with
+	// the cookies of the session it replaced is exactly the mismatch the server
+	// rejects as a CSRF failure.
+	t.addCookies(req)
 
 	// Execute request
 	traceHTTPRequest(req, opts.Body)
@@ -233,11 +235,24 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
 	traceHTTPResponse(resp, body)
+	t.adoptServerCookies(resp)
+
+	// The same expiry reaches a plain read as a successful-looking response that
+	// was in fact served by the identity provider. Nothing downstream would
+	// recognise the logon page it carries, so catch it here by origin.
+	if resp.StatusCode < 400 && t.canReauth() && t.redirectedAwayFromSAP(resp) {
+		t.setCSRFToken("")
+		t.setSessionID("")
+		if err := t.callReauthFunc(ctx); err != nil {
+			return nil, fmt.Errorf("re-authenticating after an SSO redirect on %s: %w", path, err)
+		}
+		return t.retryRequest(ctx, path, opts)
+	}
 
 	// Handle CSRF token refresh on 403
 	if resp.StatusCode == http.StatusForbidden && isModifyingMethod(opts.Method) {
 		// Try to refresh CSRF token and retry once
-		if err := t.fetchCSRFToken(ctx); err != nil {
+		if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
 			return nil, fmt.Errorf("refreshing CSRF token: %w", err)
 		}
 
@@ -274,7 +289,7 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 			t.setSessionID("")
 			t.clearSAPSessionCookies()
 			// Fetch new CSRF token (this establishes a new session)
-			if err := t.fetchCSRFToken(ctx); err != nil {
+			if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
 				return nil, fmt.Errorf("refreshing session after timeout: %w", err)
 			}
 			// Retry the request
@@ -295,7 +310,7 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 				}
 			} else {
 				// Basic auth: just refresh CSRF token.
-				if err := t.fetchCSRFToken(ctx); err != nil {
+				if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
 					return nil, fmt.Errorf("re-authenticating after 401 on %s: %w (original error: %v)", path, err, apiErr)
 				}
 			}
@@ -333,14 +348,14 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 	if t.config.HasBasicAuth() {
 		req.SetBasicAuth(t.config.Username, t.config.Password)
 	}
-	t.addCookies(req)
 	t.setDefaultHeaders(req, opts)
+	t.addCookies(req)
 	req.Header.Set("X-CSRF-Token", t.getCSRFToken())
 
-	// Ensure session type header is set for retry
-	if t.config.SessionType == SessionStateful {
-		req.Header.Set("X-sap-adt-sessiontype", "stateful")
-	}
+	// The session-type header is already set, correctly, by setDefaultHeaders
+	// above. The second copy that used to stand here tested only
+	// SessionStateful, so it never knew about SessionKeep; it could only ever
+	// re-set what setDefaultHeaders had already decided.
 
 	traceHTTPRequest(req, opts.Body)
 	resp, err := t.httpClient.Do(req)
@@ -371,97 +386,154 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 }
 
 // fetchCSRFToken retrieves a CSRF token from the server.
-// Uses /core/discovery with HEAD for optimal performance (~25ms vs ~56s for GET on /discovery)
-func (t *Transport) fetchCSRFToken(ctx context.Context) error {
-	reqURL, err := t.buildURL("/sap/bc/adt/core/discovery", nil)
+//
+// HEAD on /core/discovery is the fast path (milliseconds, against tens of seconds
+// for a GET on /discovery on a slow system). Older releases — BASIS 740, ECC EhP7 —
+// answer that HEAD with 400 and no token at all, which used to make vsp unusable
+// against them, so a missing token falls back to GET.
+//
+// A 401 is reported at once: no method will fix a wrong password. A **403 is
+// not** — some systems refuse the HEAD and answer the GET perfectly well, so
+// short-circuiting there reintroduced exactly the unusability the fallback
+// exists to prevent. Let GET have its turn; if it is also forbidden, the error
+// below says so.
+//
+// stateful marks the probe as belonging to a stateful session. It matters
+// because of *when* this runs: the 403-CSRF-refresh and session-expiry paths
+// fire from inside Request, which is reached with a lock held. An unmarked
+// probe is a stateless request, SAP retires the ICM context the lock lives in,
+// and the write that follows comes back 423 InvalidLockHandle — the same bug
+// class as the SyntaxCheck-under-lock hop that moved before the lock. Callers
+// that hold no session (a fresh re-auth) pass false.
+func (t *Transport) fetchCSRFToken(ctx context.Context, stateful bool) error {
+	return t.fetchCSRFTokenWithReauth(ctx, true, stateful)
+}
+
+// fetchCSRFTokenWithReauth fetches a token, optionally recovering an expired
+// session on the way.
+//
+// allowReauth exists to break a cycle: re-authenticating ends with a token
+// fetch of its own, and that fetch must not start another re-authentication.
+func (t *Transport) fetchCSRFTokenWithReauth(ctx context.Context, allowReauth, stateful bool) error {
+	token, status, redirected, err := t.probeCSRFToken(ctx, http.MethodHead, stateful)
 	if err != nil {
-		return fmt.Errorf("building URL: %w", err)
+		return err
 	}
-
-	// Use HEAD instead of GET for faster CSRF token fetch (~5s vs ~56s on slow systems)
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-
-	// Set authentication
-	if t.config.HasBasicAuth() {
-		req.SetBasicAuth(t.config.Username, t.config.Password)
-	}
-	t.addCookies(req)
-	req.Header.Set("X-CSRF-Token", "fetch")
-	req.Header.Set("Accept", "*/*")
-
-	// Set session type header for stateful sessions
-	if t.config.SessionType == SessionStateful {
-		req.Header.Set("X-sap-adt-sessiontype", "stateful")
-	}
-
-	traceHTTPRequest(req, nil)
-	headResp, err := t.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
-	}
-	_, _ = io.Copy(io.Discard, headResp.Body)
-	headResp.Body.Close()
-	traceHTTPResponse(headResp, nil)
-
-	// Use the HEAD response by default; fall back to GET when HEAD returns no usable token.
-	// Some SAP systems (on-premise, S/4HANA cloud) reject HEAD or return no token —
-	// CL_ADT_WB_RES_APP may not implement HEAD. GET is what Eclipse ADT uses.
-	//
-	// But skip the GET fallback on 401/403: there the token is absent because the
-	// credentials/authorizations are invalid, not because HEAD is unsupported — a GET
-	// retry can't help and only wastes a round-trip (and would swallow a mock slot in
-	// the re-auth-failure path).
-	resp := headResp
-	headToken := headResp.Header.Get("X-CSRF-Token")
-	headIsAuthFailure := headResp.StatusCode == http.StatusUnauthorized ||
-		headResp.StatusCode == http.StatusForbidden
-	if (headToken == "" || headToken == "Required") && !headIsAuthFailure {
-		reqGet, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-		if err != nil {
-			return fmt.Errorf("creating GET fallback request: %w", err)
-		}
-		if t.config.HasBasicAuth() {
-			reqGet.SetBasicAuth(t.config.Username, t.config.Password)
-		}
-		t.addCookies(reqGet)
-		reqGet.Header.Set("X-CSRF-Token", "fetch")
-		reqGet.Header.Set("Accept", "*/*")
-		if t.config.SessionType == SessionStateful {
-			reqGet.Header.Set("X-sap-adt-sessiontype", "stateful")
-		}
-		traceHTTPRequest(reqGet, nil)
-		getResp, err := t.httpClient.Do(reqGet)
-		if err != nil {
-			return fmt.Errorf("executing GET fallback: %w", err)
-		}
-		_, _ = io.Copy(io.Discard, getResp.Body)
-		getResp.Body.Close()
-		traceHTTPResponse(getResp, nil)
-		resp = getResp
-	}
-
-	// Note: HEAD may return 400 but still provides CSRF token in headers
-	// But 401 indicates auth failure and won't have a valid token
-
-	token := resp.Header.Get("X-CSRF-Token")
-	if token == "" || token == "Required" {
-		// Provide better error message based on status code
-		switch resp.StatusCode {
-		case http.StatusUnauthorized:
+	if !isCSRFToken(token) {
+		if status == http.StatusUnauthorized && !t.canReauth() {
 			return fmt.Errorf("authentication failed (401): check username/password")
-		case http.StatusForbidden:
-			return fmt.Errorf("access forbidden (403): check user authorizations")
-		default:
-			return fmt.Errorf("no CSRF token in response (HTTP %d)", resp.StatusCode)
+		}
+		var getStatus int
+		var getRedirected bool
+		token, getStatus, getRedirected, err = t.probeCSRFToken(ctx, http.MethodGet, stateful)
+		if err != nil {
+			return err
+		}
+		if !isCSRFToken(token) {
+			// An expired SSO session rarely announces itself as a 401. ICF sends
+			// the request on to the identity provider, the redirect chain is
+			// followed, and back comes a logon page under a perfectly ordinary
+			// 200 — with no CSRF token in it, because it is not ADT answering.
+			// A live ADT session always yields a token, so its absence here is
+			// the signal, and a hop to a foreign host is the confirmation.
+			if allowReauth && t.canReauth() && getStatus != http.StatusForbidden {
+				reason := fmt.Sprintf("no CSRF token (HEAD %d, GET %d)", status, getStatus)
+				if redirected || getRedirected {
+					reason = "the identity provider answered instead of SAP"
+				}
+				if t.config.Verbose {
+					fmt.Fprintf(os.Stderr, "[AUTH] session looks expired — %s; re-authenticating\n", reason)
+				}
+				if err := t.callReauthFunc(ctx); err != nil {
+					return fmt.Errorf("re-authenticating (%s): %w", reason, err)
+				}
+				// callReauthFunc ends by fetching a token with the new session.
+				if isCSRFToken(t.getCSRFToken()) {
+					return nil
+				}
+				return t.fetchCSRFTokenWithReauth(ctx, false, stateful)
+			}
+			switch getStatus {
+			case http.StatusUnauthorized:
+				return fmt.Errorf("authentication failed (401): check username/password")
+			case http.StatusForbidden:
+				return fmt.Errorf("access forbidden (403): check user authorizations")
+			default:
+				return fmt.Errorf("no CSRF token in response (HEAD %d, GET %d)", status, getStatus)
+			}
 		}
 	}
 
 	t.setCSRFToken(token)
 	return nil
 }
+
+// probeCSRFToken asks /core/discovery for a token with the given method and
+// returns the token (empty when the server did not supply one), the status, and
+// whether the answer came from somewhere other than the SAP host.
+func (t *Transport) probeCSRFToken(ctx context.Context, method string, stateful bool) (token string, status int, redirected bool, err error) {
+	reqURL, err := t.buildURL("/sap/bc/adt/core/discovery", nil)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("building URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("creating request: %w", err)
+	}
+
+	if t.config.HasBasicAuth() {
+		req.SetBasicAuth(t.config.Username, t.config.Password)
+	}
+	t.addCookies(req)
+	req.Header.Set("X-CSRF-Token", "fetch")
+	req.Header.Set("Accept", "*/*")
+	// The header is only ever *added* here, never set to "stateless": an
+	// unmarked probe is what the server already assumed, so leaving it off
+	// keeps the previous behaviour for callers that hold no session, while a
+	// probe fired from inside a locked window no longer retires the context
+	// that lock lives in.
+	if stateful {
+		req.Header.Set("X-sap-adt-sessiontype", "stateful")
+	}
+
+	traceHTTPRequest(req, nil)
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return "", 0, false, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+	// Drain the body so the connection can be reused.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	traceHTTPResponse(resp, nil)
+	t.adoptServerCookies(resp)
+
+	return resp.Header.Get("X-CSRF-Token"), resp.StatusCode, t.redirectedAwayFromSAP(resp), nil
+}
+
+// redirectedAwayFromSAP reports whether a response was ultimately served by
+// some host other than the SAP system — which, for a request that asked for an
+// ADT resource, means an identity provider answered instead.
+func (t *Transport) redirectedAwayFromSAP(resp *http.Response) bool {
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return false
+	}
+	base, err := url.Parse(t.config.BaseURL)
+	if err != nil || base.Host == "" {
+		return false
+	}
+	return !strings.EqualFold(resp.Request.URL.Host, base.Host)
+}
+
+// canReauth reports whether a fresh session can be obtained without asking
+// anyone for a password — that is, whether some browser or SSO flow is standing
+// by to produce one.
+func (t *Transport) canReauth() bool {
+	return !t.config.HasBasicAuth() && t.config.ReauthFunc != nil
+}
+
+// isCSRFToken reports whether the header value is an actual token rather than the
+// server's "Required" placeholder.
+func isCSRFToken(v string) bool { return v != "" && v != "Required" }
 
 // buildURL constructs the full URL for an API request.
 // overrideLang, if non-empty, overrides the configured session language for
@@ -528,11 +600,36 @@ func (t *Transport) setDefaultHeaders(req *http.Request, opts *RequestOptions) {
 	// Set session header: per-request Stateful flag overrides global default.
 	// Lock→write→unlock sequences require stateful mode to maintain session
 	// affinity for lock handles (issue #88).
-	if opts.Stateful || t.config.SessionType == SessionStateful {
+	//
+	// The configured half of the decision lives in sessionTypeIsStateful, which
+	// retryRequest and probeCSRFToken consult too — three copies of this rule
+	// used to disagree, and the SessionKeep case was fixed in only one of them.
+	if opts.Stateful || t.sessionTypeIsStateful() {
 		req.Header.Set("X-sap-adt-sessiontype", "stateful")
 	} else {
 		req.Header.Set("X-sap-adt-sessiontype", "stateless")
 	}
+}
+
+// sessionTypeIsStateful reports whether a request carrying no per-request
+// Stateful flag should still be marked stateful, from the configured session
+// type and the session the transport currently holds.
+//
+// SessionKeep means "use the existing session if there is one, otherwise
+// stateless". It used to fall through to the stateless branch, so setting
+// SAP_SESSION_TYPE=keep to cure lock-handle errors produced exactly the
+// stateless behaviour the user was trying to escape, with no diagnostic.
+//
+// Caveat worth knowing before relying on the keep branch: it turns on only once
+// getSessionID() is non-empty, and extractSessionID matches the literal cookie
+// name "SAP_SESSIONID", while real systems send SAP_SESSIONID_<SID>_<CLIENT>.
+// In practice only sap-contextid — which SAP issues in answer to a request that
+// was already stateful — can set it. Nothing clears it on a successful flow
+// either. So "keep" is closer to "stateless until something else goes stateful,
+// then stateful for the life of the process" than to what its doc comment says.
+func (t *Transport) sessionTypeIsStateful() bool {
+	return t.config.SessionType == SessionStateful ||
+		(t.config.SessionType == SessionKeep && t.getSessionID() != "")
 }
 
 // extractSessionID extracts the session ID from response cookies.
@@ -576,8 +673,8 @@ func (t *Transport) clearSAPSessionCookies() {
 	if !ok {
 		return
 	}
-	fresh, err := cookiejar.New(nil)
-	if err != nil {
+	fresh := newCookieJar()
+	if fresh == nil {
 		return
 	}
 	hc.Jar = fresh
@@ -676,7 +773,21 @@ func IsSessionExpiredError(err error) bool {
 // Ping sends a lightweight HEAD request to /sap/bc/adt/core/discovery to keep the session alive.
 // It refreshes the CSRF token as a side effect.
 func (t *Transport) Ping(ctx context.Context) error {
-	return t.fetchCSRFToken(ctx)
+	// The keep-alive must not be the request that ends the session it is
+	// keeping alive, so it inherits the transport's own stateful posture.
+	return t.fetchCSRFToken(ctx, t.sessionTypeIsStateful())
+}
+
+// CheckSession reports whether this client has a usable, authenticated ADT
+// session, and returns why not when it does not.
+//
+// It is the CSRF token fetch, deliberately, rather than a status code or a
+// query: a live ADT session always yields a token, and an expired SSO session
+// answers 200 with a logon page that carries none. The whole of that detection
+// already lives in fetchCSRFToken, and a second implementation beside it would
+// be a second thing to keep right.
+func (c *Client) CheckSession(ctx context.Context) error {
+	return c.transport.Ping(ctx)
 }
 
 // reauthCooldown prevents concurrent 401 handlers from triggering simultaneous
@@ -701,7 +812,11 @@ func (t *Transport) callReauthFunc(ctx context.Context) error {
 	}
 
 	// Apply a timeout so the mutex is not held indefinitely during network I/O.
-	reauthCtx, cancel := context.WithTimeout(ctx, reauthTimeout)
+	timeout := t.config.ReauthTimeout
+	if timeout <= 0 {
+		timeout = reauthTimeout
+	}
+	reauthCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cookies, err := t.config.ReauthFunc(reauthCtx)
@@ -712,15 +827,84 @@ func (t *Transport) callReauthFunc(ctx context.Context) error {
 	t.cookiesMu.Lock()
 	t.config.Cookies = cookies
 	t.cookiesMu.Unlock()
+	// The jar still holds what the expired session's server set — including its
+	// own SAP_SESSIONID, which would ride along beside the new one and leave the
+	// server to pick between them.
+	t.clearSAPSessionCookies()
 
 	// Fetch CSRF token with the new cookies.
 	// Set lastReauth only after CSRF succeeds — if it fails, the next
 	// goroutine should retry rather than hitting the cooldown skip.
-	if err := t.fetchCSRFToken(reauthCtx); err != nil {
+	if err := t.fetchCSRFTokenWithReauth(reauthCtx, false, false); err != nil {
 		return err
 	}
 	t.lastReauth = time.Now()
 	return nil
+}
+
+// adoptServerCookies takes over any cookie the server just reissued that this
+// client also holds explicitly.
+//
+// A logon ticket outlives the session it opened. When the session lapses while
+// the ticket is still good, the next request authenticates on the ticket, and
+// SAP quietly opens a new session and returns its id in Set-Cookie. The jar
+// keeps that one; config.Cookies still holds the lapsed one, and both go out on
+// the following request under the same name. The server honours one of them and
+// the CSRF token belongs to the other, so a perfectly authenticated client is
+// told its token is invalid — a failure that names neither the session nor the
+// ticket and points at the wrong thing entirely.
+//
+// Taking the server's value keeps one id in play instead of two.
+func (t *Transport) adoptServerCookies(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	fresh := resp.Cookies()
+	if len(fresh) == 0 {
+		return
+	}
+
+	t.cookiesMu.Lock()
+	defer t.cookiesMu.Unlock()
+	for _, c := range fresh {
+		if c.Value == "" {
+			continue
+		}
+		if held, ok := t.config.Cookies[c.Name]; ok && held != c.Value {
+			t.config.Cookies[c.Name] = c.Value
+			if t.config.Verbose {
+				fmt.Fprintf(os.Stderr, "[AUTH] server reissued %s — using the new one\n", c.Name)
+			}
+		}
+	}
+}
+
+// CurrentCookies returns a copy of the session this client is using now.
+//
+// The session is not the one it started with: an expiry replaces the whole map,
+// so anything that took a snapshot at startup is holding a dead one. A caller
+// that needs to authenticate elsewhere — opening a WebSocket, say — has to ask
+// at the moment it connects rather than remember.
+func (t *Transport) CurrentCookies() map[string]string {
+	t.cookiesMu.RLock()
+	defer t.cookiesMu.RUnlock()
+	if len(t.config.Cookies) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(t.config.Cookies))
+	for name, value := range t.config.Cookies {
+		out[name] = value
+	}
+	return out
+}
+
+// SetCookies replaces the session this client authenticates with. This is what
+// a re-authentication does, and it is exported so a caller that obtained a
+// session some other way can hand it over without rebuilding the client.
+func (t *Transport) SetCookies(cookies map[string]string) {
+	t.cookiesMu.Lock()
+	defer t.cookiesMu.Unlock()
+	t.config.Cookies = cookies
 }
 
 // addCookies adds user-provided cookies to a request under cookiesMu read lock.

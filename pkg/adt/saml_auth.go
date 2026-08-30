@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -48,7 +47,9 @@ func SAMLLogin(ctx context.Context, sapURL string, credProvider CredentialProvid
 	defer zeroBytes(username)
 	defer zeroBytes(password)
 
-	jar, _ := cookiejar.New(nil)
+	// newCookieJar, not cookiejar.New — see config.go: a bare jar drops the
+	// Secure stripping that plain-HTTP systems behind a proxy depend on.
+	jar := newCookieJar()
 	client := &http.Client{
 		Jar: jar,
 		Transport: &http.Transport{

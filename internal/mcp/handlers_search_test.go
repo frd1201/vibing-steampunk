@@ -62,8 +62,13 @@ func TestHandleSearchObject_ServerSideTypeFilter(t *testing.T) {
 	if got := q.Get("objectType"); got != "CLAS/OC" {
 		t.Errorf("objectType = %q, want %q (short form should be canonicalized)", got, "CLAS/OC")
 	}
-	if got := q.Get("maxResults"); got != "5" {
-		t.Errorf("maxResults = %q, want %q", got, "5")
+	// Six, not five: upstream over-fetches by one so a full page can be told
+	// apart from a page that happens to be exactly the size of the limit. The
+	// point of this assertion is that the caller's limit still reaches the
+	// server at all — the server-side filter is useless if maxResults is
+	// dropped or fixed to a default on the way.
+	if got := q.Get("maxResults"); got != "6" {
+		t.Errorf("maxResults = %q, want %q (asked for 5, plus one truncation probe)", got, "6")
 	}
 	if got := q.Get("query"); got != "Z*" {
 		t.Errorf("query = %q, want %q", got, "Z*")
