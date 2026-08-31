@@ -196,16 +196,16 @@ Keep these branches alive until the PR is closed.
 
 | PR | Branch | Subject | Status |
 |---|---|---|---|
-| ~~[#120](https://github.com/oisee/vibing-steampunk/pull/120)~~ | `fix/csrf-head-fallback-and-session-type` | CSRF HEAD→GET fallback, secure-cookie fix, `SAP_SESSION_TYPE` | **to close** — see *Superseded by upstream* |
-| [#121](https://github.com/oisee/vibing-steampunk/pull/121) | `feat/incl-write-support` | INCL (PROG/I) write support | open since 2026-04-23 |
-| [#126](https://github.com/oisee/vibing-steampunk/pull/126) | `fix/search-type-filter-issue-119` | server-side search type filter | open since 2026-05-01 |
+| ~~[#120](https://github.com/oisee/vibing-steampunk/pull/120)~~ | `fix/csrf-head-fallback-and-session-type` | CSRF HEAD→GET fallback, secure-cookie fix, `SAP_SESSION_TYPE` | **closed** 2026-08-31 — see *Superseded by upstream* |
+| [#121](https://github.com/oisee/vibing-steampunk/pull/121) | `feat/incl-write-support` | INCL (PROG/I) write support | open since 2026-04-23, rebased onto `upstream/main` 2026-08-31 |
+| [#126](https://github.com/oisee/vibing-steampunk/pull/126) | `fix/search-type-filter-issue-119` | server-side search type filter | open since 2026-05-01, rebased onto `upstream/main` 2026-08-31 |
 
 All three are already merged into `main` here. If one stays unanswered for about
 twelve months, close it with a factual pointer to the fork commit.
 
 ### Superseded by upstream
 
-**#120 — close it.** Upstream solved the same problem independently and better,
+**#120 — closed 2026-08-31.** Upstream solved the same problem independently and better,
 and part of our version is now known to be wrong.
 
 - `6b136b7` shipped the HEAD→GET fallback with a 401 **and** 403 short-circuit
@@ -228,8 +228,12 @@ should carry only those two.
 
 **#121 and #126 stay valid.** Upstream's include work (`4dff03f`) is a *read*
 fallback only and never touches the write path; and `SearchObjectByType` /
-`CanonicalObjectType` do not exist upstream at all. Both branches need rebasing
-onto the new `upstream/main` before the PRs will apply cleanly again.
+`CanonicalObjectType` do not exist upstream at all. Both branches were rebased
+onto `upstream/main` (`9b8789d`) on 2026-08-31 — each had one textual conflict
+(upstream had independently added the same maxResults+1 over-fetch trick for
+truncation detection that #126 collided with; #121 collided with upstream's
+own widening of the WriteSource type switch to `FUNC`/`MSAG`/`TABL`). Both are
+`MERGEABLE`/`CLEAN` again after the push.
 
 **Review dates:** the module-path trigger is **void as written** (checked
 2026-08-28). It rested on upstream's six-month code-commit clock started
@@ -399,9 +403,9 @@ path in a single commit if any of these happens:
   2026-04-15, so **check on 2026-10-15**~~ — **void, checked 2026-08-28.**
   Upstream shipped 341 commits in the week to 2026-08-27. Dormancy is not the
   scenario to plan for; keeping up with an active upstream is; or
-- our upstream PRs are rejected — the live one. #120 is being closed as
-  superseded, which is not a rejection, but two of three remain unanswered
-  since April; or
+- our upstream PRs are rejected — the live one. #120 was closed 2026-08-31 as
+  superseded, which is not a rejection, but the other two remain unanswered
+  since April/May; or
 - we deliberately decide to hard-fork.
 
 Cost of the move: 104 files (73 of them Go), plus a permanent merge tax on every
