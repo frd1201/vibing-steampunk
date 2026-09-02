@@ -194,14 +194,25 @@ to avoid ever needing this.
 
 Keep these branches alive until the PR is closed.
 
+**Nothing is open upstream as of 2026-09-02.** All three closed within four days
+of the August rebase, which is the fact this table now exists to record.
+
 | PR | Branch | Subject | Status |
 |---|---|---|---|
 | ~~[#120](https://github.com/oisee/vibing-steampunk/pull/120)~~ | `fix/csrf-head-fallback-and-session-type` | CSRF HEAD→GET fallback, secure-cookie fix, `SAP_SESSION_TYPE` | **closed** 2026-08-31 — see *Superseded by upstream* |
-| [#121](https://github.com/oisee/vibing-steampunk/pull/121) | `feat/incl-write-support` | INCL (PROG/I) write support | open since 2026-04-23, rebased onto `upstream/main` 2026-08-31 |
-| [#126](https://github.com/oisee/vibing-steampunk/pull/126) | `fix/search-type-filter-issue-119` | server-side search type filter | open since 2026-05-01, rebased onto `upstream/main` 2026-08-31 |
+| ~~[#121](https://github.com/oisee/vibing-steampunk/pull/121)~~ | `feat/incl-write-support` | INCL (PROG/I) write support | **merged** upstream (`d8ee78c`), after 131 days open |
+| ~~[#126](https://github.com/oisee/vibing-steampunk/pull/126)~~ | `fix/search-type-filter-issue-119` | server-side search type filter | **merged** upstream (`598e37c`), after 123 days open |
+| ~~[#164](https://github.com/oisee/vibing-steampunk/pull/164)~~ | `fix/query-top-0-returns-100-rows` | `--top 0` / `all_rows` returns every row | **merged** upstream (`df4a186`) |
 
-All three are already merged into `main` here. If one stays unanswered for about
-twelve months, close it with a factual pointer to the fork commit.
+Both `feat/*` branches are now released: nothing upstream holds them, so they can
+be deleted. The close-if-unanswered dates (2027-04-23, 2027-05-01) are void.
+
+One thing the merges cost us: upstream's copies are the revisions as submitted,
+not the revisions on `main`. The September sync therefore brought a second,
+older `WriteInclude` and a duplicate `TestLockObject_RejectsLockWithoutHandle`
+back into the tree, both of which had to be dropped by hand. Expect that shape
+whenever one of our PRs lands after we have kept working on the branch's subject
+here.
 
 ### Superseded by upstream
 
@@ -249,8 +260,19 @@ Close-if-unanswered dates: #121 on **2027-04-23**, #126 on **2027-05-01**.
 `4b80378` (corrNr at LOCK time) is **upstream-worthy** — it follows the SAP ADT
 API spec and helps anyone editing objects in transportable packages. It was
 developed on a fork-only branch before this operating model existed, so no PR
-exists. Back-fill it per the procedure above: branch off `upstream/main`,
-cherry-pick `4b80378`, open a PR. Until then it lives only in this fork.
+exists.
+
+The September sync raised the price of not doing it. `LockObject` had four
+parameters here and three upstream, so every upstream call site is written
+three-argument and each one arrives as a build break at the next merge — twice
+now, and the September occurrence (`pkg/adt/session_affinity_test.go`) merged
+without a conflict at all before failing to compile. `b615466` makes `corrNr`
+variadic, which makes both spellings valid and takes the recurrence to zero.
+
+**Back-fill `b615466` together with `4b80378`.** The variadic signature is the
+part upstream can accept without changing a single call site of their own, which
+makes it the version worth offering. Branch off `upstream/main`, cherry-pick
+both, open a PR.
 
 ---
 
@@ -263,12 +285,18 @@ adopted yet.
 |---|---|---|---|---|
 | [#108](https://github.com/oisee/vibing-steampunk/pull/108) | dme007 | deploy session ordering, MODIFICATION_SUPPORT | **adopted** 2026-08-03 (`2d4fa5f`) | `1bc5804` shows SAP's `IF_ADT_LOCK_RESULT` documents `NoModification` as `CO_MOD_SUPPORT_NOT_NEEDED`, so the guard from `22517d4` was a false positive on customer-namespace objects. Also brings redirect header preservation and `ICMENOSESSION` recovery, which we lacked. Conflicts: comment-only in `workflows_deploy.go`; in `http.go` both sides kept (our CSRF `HEAD`→`GET` fallback from #120 plus their trace helpers and `clearSAPSessionCookies`); their redirect handling is `CheckRedirect` in `pkg/adt/config.go`, not `http.go`. |
 | [#125](https://github.com/oisee/vibing-steampunk/pull/125) | dme007 | skip redundant mutation gate after lock | **superseded** by #108 | same subject area; #108 covers it |
-| [#139](https://github.com/oisee/vibing-steampunk/pull/139) | enricoandreoli | program includes as source-bearing objects | **pending** | collides with our #121 |
-| [#145](https://github.com/oisee/vibing-steampunk/pull/145) | zooloo303 | reuse an object's open transport instead of 409 | **pending** | adjacent to our write paths |
+| [#139](https://github.com/oisee/vibing-steampunk/pull/139) | enricoandreoli | program includes as source-bearing objects | **moot** | our #121 landed upstream first (`d8ee78c`) |
+| [#145](https://github.com/oisee/vibing-steampunk/pull/145) | zooloo303 | reuse an object's open transport instead of 409 | **adopted** 2026-09-02 (`3bbf200`) | merged upstream as `8dd2ef8`; `resolveWriteTransport` re-runs `checkTransportableEdit` on the discovered request, so auto-reuse cannot bypass `--allow-transportable-edits` or `--allowed-transports`. Interacts cleanly with corrNr-at-LOCK: a supplied transport makes the reuse a no-op, an empty one lets `LockResult.CorrNr` supply it |
+| [#149](https://github.com/oisee/vibing-steampunk/pull/149) | lin2qwer1-cloud | SRVB read routing, `binding_category` docs | **adopted** 2026-09-02 (`3bbf200`) | SRVB was advertised and dropped by the switch; the docs had 0/1 inverted (0=UI, 1=A2X) |
+| [#106](https://github.com/oisee/vibing-steampunk/pull/106) | dme007 | install: propagate Description, `PackageExists` probe | **adopted** 2026-09-02 (`3bbf200`) | `GetPackage` cannot tell "no package" from "empty package" |
+| [#128](https://github.com/oisee/vibing-steampunk/pull/128) | andreasmuenster | client for browser auth | **adopted** 2026-09-02 (`3bbf200`) | arrived carrying the revert of our #120 content — see *Superseded by upstream* |
+| [#173](https://github.com/oisee/vibing-steampunk/pull/173) | oisee | transport listing rebuilt around the tree | **adopted** 2026-09-02 (`3bbf200`) | no fork code in the area |
+| [#174](https://github.com/oisee/vibing-steampunk/pull/174) | oisee | activation parser | **adopted** 2026-09-02 (`3bbf200`) | supersedes our own fix for the same defect: theirs merges the wrapped and root shapes for messages, entries **and** properties, ours only for messages |
+| [#167](https://github.com/oisee/vibing-steampunk/pull/167) | oisee | issue #91 session affinity | **adopted** 2026-09-02 (`3bbf200`) | supersedes most of our #88 work — see the sync row below |
 
-Watched, no collision known: #150 (ActivateMultiple), #149 (SRVB read), #148
-(activation parsing), #138 (InstallZADTVSP source deploy), #130 (ENHO read),
-#128 (browser-auth client), #107 (WebSocket proxy), #106 (install description).
+Watched, no collision known: #150 (ActivateMultiple), #148 (activation
+parsing), #138 (InstallZADTVSP source deploy), #130 (ENHO read), #107
+(WebSocket proxy).
 
 ---
 
@@ -288,6 +316,7 @@ Deliberately not upstreamed. No PR is owed for these.
 | Sync | Upstream head | Scope | Notes |
 |---|---|---|---|
 | `sync/upstream-2026-08` | `9b8789d` (2026-08-27) | 341 commits, 314 files, +52,440 | 13 conflicts. Upstream had independently built several of our fixes, so most resolutions were a choice between two implementations rather than a combination — upstream won wherever the effect was the same. Three defects would have merged in silently: a new upstream file calling the three-arg `LockObject` (broke `go build`), a duplicate jar-reset that discarded the `httpCookieJar` wrapper, and unreachable code that `go vet` rejects. |
+| `sync/upstream-2026-09` | `8dd2ef8` (2026-09-02) | 50 commits, 48 files, +4,119 | 17 conflicts — more than the August sync on an eighth of the volume, because both trees had spent the week on the same defect. Upstream's issue #91 work supersedes most of our #88 work and was taken whole. Two traps: `resetCookieJar` would have deleted the `httpCookieJar` wrapper (the August trap, renamed), and a new upstream *test* file merged clean and then failed to compile against our four-argument `LockObject` — fixed at the root by `b615466`. Three of our own PRs landed upstream during the window and came back as duplicate definitions. |
 
 **What made this sync survivable** was writing the missing tests *first*. Eleven
 of sixteen fork corrections had no test at all, so the merge had no acceptance
@@ -334,6 +363,13 @@ does not know about `SessionKeep`.
 1 — branch off `upstream/main`, not `main`), so when it is picked up it should
 go through Workflow A rather than being patched here first.
 
+**Rechecked 2026-09-02, after the September sync: still open.** Upstream's
+issue #91 work went through `Request()` and the CSRF probe and left
+`retryRequest` untouched, so the gap between the two paths is exactly where it
+was. With #121, #126 and #164 all merged, this is now the strongest candidate
+for the next upstream PR — behind the `b615466` + `4b80378` back-fill, which
+has a concrete recurring cost attached to it.
+
 ### 2. Unsynchronised jar swap on a shared `http.Client`
 
 `clearSAPSessionCookies` (`pkg/adt/http.go:641`) assigns `hc.Jar` while other
@@ -343,6 +379,12 @@ concurrent tool calls on one client too, so the race is reachable — the sessio
 expiry path at `:296` is not covered by `reauthMu`. Detectable under
 `go test -race`. A fix needs to decide what the concurrency contract of
 `Transport` actually is, which is why it is not a quick patch.
+
+**Rechecked 2026-09-02: unchanged, and deliberately so.** The September sync
+kept `clearSAPSessionCookies` over upstream's `resetCookieJar`, so the race
+comes with it. Upstream's version has the same race and additionally drops the
+Secure-stripping jar, so taking theirs would have traded a known race for a
+known regression.
 
 ---
 
@@ -403,9 +445,11 @@ path in a single commit if any of these happens:
   2026-04-15, so **check on 2026-10-15**~~ — **void, checked 2026-08-28.**
   Upstream shipped 341 commits in the week to 2026-08-27. Dormancy is not the
   scenario to plan for; keeping up with an active upstream is; or
-- our upstream PRs are rejected — the live one. #120 was closed 2026-08-31 as
-  superseded, which is not a rejection, but the other two remain unanswered
-  since April/May; or
+- ~~our upstream PRs are rejected~~ — **void, checked 2026-09-02.** #121, #126
+  and #164 were all merged upstream between 2026-09-01 and 2026-09-02; #120 was
+  closed as superseded, not rejected. Every clause of this trigger that rested
+  on upstream being unresponsive has now been disproved by upstream. What is
+  left is the third one; or
 - we deliberately decide to hard-fork.
 
 Cost of the move: 104 files (73 of them Go), plus a permanent merge tax on every
