@@ -70,6 +70,10 @@ func (c *Client) SyntaxCheck(ctx context.Context, objectURL string, content stri
 	return parseSyntaxCheckResults(resp.Body)
 }
 
+// lineOffsetRegex pulls the position out of a checkMessage's uri fragment
+// ("...#start=12,4"). Compiled once: it was being rebuilt on every parse.
+var lineOffsetRegex = regexp.MustCompile(`([^#]+)#start=(\d+),(\d+)`)
+
 func parseSyntaxCheckResults(data []byte) ([]SyntaxCheckResult, error) {
 	// The response uses namespace prefixes — chkrun:uri, chkrun:type — and this
 	// used to strip "chkrun:" out of the whole document first, on the belief that
@@ -102,7 +106,6 @@ func parseSyntaxCheckResults(data []byte) ([]SyntaxCheckResult, error) {
 	}
 
 	var results []SyntaxCheckResult
-	lineOffsetRegex := regexp.MustCompile(`([^#]+)#start=(\d+),(\d+)`)
 
 	for _, report := range resp.Reports {
 		for _, msg := range report.MessageList.Messages {

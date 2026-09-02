@@ -548,14 +548,11 @@ func processBrowserAuth(cmd *cobra.Command) error {
 		browserExec = viper.GetString("BROWSER_EXEC")
 	}
 
-	// Determine sap client
-	sapClient := cfg.Client
-	if sapClient == "" {
-		sapClient = viper.GetString("CLIENT")
-	}
-
+	// resolveConfig already applied flag > SAP_CLIENT env > default to
+	// cfg.Client before this function runs, so there is no second source to
+	// consult here.
 	ctx := cmd.Context()
-	cookies, err := adt.BrowserLogin(ctx, cfg.BaseURL, cfg.InsecureSkipVerify, timeout, browserExec, cfg.Verbose, sapClient)
+	cookies, err := adt.BrowserLogin(ctx, cfg.BaseURL, cfg.InsecureSkipVerify, timeout, browserExec, cfg.Verbose, cfg.Client)
 	if err != nil {
 		return fmt.Errorf("browser authentication failed: %w", err)
 	}

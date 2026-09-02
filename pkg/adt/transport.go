@@ -72,6 +72,12 @@ func (c *Client) GetUserTransports(ctx context.Context, userName string) (*UserT
 		return nil, err
 	}
 
+	// Same default as ListTransports: an omitted user means the connection's
+	// own. Without it the E070 fallback below refuses an empty name outright,
+	// so a caller that used to get an empty list now gets an error instead.
+	if userName == "" {
+		userName = c.config.Username
+	}
 	userName = strings.ToUpper(userName)
 
 	resp, err := c.transport.Request(ctx, "/sap/bc/adt/cts/transportrequests", &RequestOptions{

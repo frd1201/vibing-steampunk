@@ -3682,11 +3682,22 @@ func runInstallAbapGit(cmd *cobra.Command, args []string) error {
 			Description: desc,
 			Mode:        adt.WriteModeUpsert,
 		}
-		_, err := client.WriteSource(ctx, obj.Type, obj.Name, obj.MainSource, wopts)
-		if err != nil {
+		// WriteSource reports most refusals as (result{Success:false}, nil) —
+		// a syntax error, a failed activation, an unsupported type. Reading
+		// only err counted every one of those as a deployed object.
+		res, err := client.WriteSource(ctx, obj.Type, obj.Name, obj.MainSource, wopts)
+		switch {
+		case err != nil:
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			failCount++
-		} else {
+		case res == nil || !res.Success:
+			msg := "unknown failure"
+			if res != nil && res.Message != "" {
+				msg = res.Message
+			}
+			fmt.Fprintf(os.Stderr, "FAILED: %s\n", msg)
+			failCount++
+		default:
 			fmt.Fprintf(os.Stderr, "OK\n")
 			success++
 		}

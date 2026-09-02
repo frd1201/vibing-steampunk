@@ -93,6 +93,10 @@ func friendlyBrowserName(path string) string {
 	}
 }
 
+// sapClientPattern is the shape of an SAP client number. Compiled once rather
+// than on every login.
+var sapClientPattern = regexp.MustCompile(`^[0-9]{3}$`)
+
 // BrowserLogin opens a headed browser window to the SAP system URL, waits for
 // SSO authentication to complete (Kerberos/SPNEGO, Keycloak, SAML, etc.),
 // and returns the session cookies.
@@ -122,8 +126,7 @@ func BrowserLogin(ctx context.Context, sapURL string, insecure bool, timeout tim
 	adtURL.RawQuery = ""
 	adtURL.Fragment = ""
 	// if a valid sap-Client is provided, add it as a query parameter to ensure cookies are set for the correct client.
-	matched, _ := regexp.MatchString(`^[0-9]{3}$`, sapClient)
-	if matched {
+	if sapClientPattern.MatchString(sapClient) {
 		q := adtURL.Query()
 		q.Set("sap-client", sapClient)
 		adtURL.RawQuery = q.Encode()

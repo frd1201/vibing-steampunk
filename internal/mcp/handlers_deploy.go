@@ -267,12 +267,15 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 		// Unlock
 		err = s.adtClient.UnlockObject(objCtx, objectURL, lockResult.LockHandle)
 		if err != nil {
-			// Not fatal for the source, which is written — but the object is
-			// left locked, so it is fatal for the next person to touch it and
-			// must not be swallowed into the summary as a success.
-			fmt.Fprintf(&sb, "UNLOCK FAIL: %v\n", err)
+			// Not fatal for the source, which is written — so it still counts
+			// as uploaded — but the object is left locked, which is fatal for
+			// the next person to touch it. Say so on this object's own line
+			// instead of printing "ok" straight after the failure.
+			fmt.Fprintf(&sb, "uploaded, but LEFT LOCKED: %v\n", err)
 			uploadFailures = append(uploadFailures,
 				fmt.Sprintf("%s %s: source uploaded but LEFT LOCKED: %v (clear it in SM12, or wait for the ADT session timeout)", obj.Type, obj.Name, err))
+			uploadSuccess++
+			continue
 		}
 
 		fmt.Fprintf(&sb, "ok\n")

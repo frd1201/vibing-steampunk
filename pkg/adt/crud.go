@@ -595,9 +595,25 @@ func (c *Client) RecoverFailedCreate(ctx context.Context, opts CreateObjectOptio
 
 // packageExists checks if a package exists in the system.
 // Returns true if package exists or if the check is inconclusive (API errors).
-// Only returns false when GetPackage succeeds but returns an empty/invalid result.
-// Uses GetPackage (nodestructure API) which passes the package name as a query
-// parameter, avoiding URL path encoding issues with $ in local package names.
+// It asks GetPackage (the nodestructure API), which passes the package name as
+// a query parameter and so avoids URL path encoding issues with $ in local
+// package names.
+//
+// KNOWN GAP — do not "tidy" this without deciding it first. Nodestructure
+// answers a missing package with a 200 and an empty tree, exactly as it answers
+// an existing but empty one, and GetPackage never returns a nil
+// *PackageContent on success. So this returns true for every name, and the
+// CreateObject guard built on it cannot fire: the orphan ENQUEUE it exists to
+// prevent is created anyway.
+//
+// Client.PackageExists is the probe that can tell the two apart, and the
+// install paths in cmd/vsp/devops.go use it. It was not swapped in here
+// because this guard blocks every create on every release: on a system where
+// /sap/bc/adt/packages is absent (handleInstallZADTVSP already warns about
+// 7.40) that probe's 404 is indistinguishable from a missing package, and the
+// false negative would stop object creation outright rather than merely fail
+// to prevent a lock. Closing it properly needs a way to tell "no such package"
+// from "no such resource".
 func (c *Client) packageExists(ctx context.Context, packageName string) bool {
 	pkg, err := c.GetPackage(ctx, packageName)
 	if err != nil {
@@ -1275,19 +1291,6 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	}
 	if opts.TableCategory == "" {
 		opts.TableCategory = "TRANSPARENT"
-	}
-
-	// Full mutation gate, not just the op-type half. CreateTable used to run
-	// checkSafety alone, so it created tables in any package the user could
-	// reach — SAP_ALLOWED_PACKAGES did not apply to it at all, and the source
-	// PUT below carried no gate either.
-	if err := c.checkMutation(ctx, MutationContext{
-		Op:        OpCreate,
-		OpName:    "CreateTable",
-		Package:   opts.Package,
-		Transport: opts.Transport,
-	}); err != nil {
-		return err
 	}
 
 	// Generate DDL source

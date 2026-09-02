@@ -155,8 +155,13 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 		return result, nil
 	}
 
+	// Detached, like the defer above: if the caller's context was cancelled or
+	// hit its deadline during the write, an unlock on that context fails inside
+	// http.NewRequestWithContext without sending a byte, and the ENQUEUE stays
+	// on the object. Marking it released either way keeps the defer from
+	// sending a second UNLOCK for a handle this one already consumed.
 	newUnlocked = true
-	if unlockErr := c.UnlockObject(ctx, newURL, lockResult.LockHandle); unlockErr != nil {
+	if unlockErr := c.releaseLockAfterFailure(ctx, newURL, lockResult.LockHandle); unlockErr != nil {
 		result.Errors = append(result.Errors, strandedLockAdvice(newURL, unlockErr))
 	}
 
@@ -202,10 +207,13 @@ func (c *Client) RenameObject(ctx context.Context, objType CreatableObjectType, 
 	err = c.DeleteObject(ctx, oldURL, oldLockResult.LockHandle, transport)
 	if err != nil {
 		// A successful DELETE releases the ENQUEUE with the object; a failed
-		// one does not. Without this the message told the caller to delete the
-		// object by hand while our own session still held a MODIFY lock on it,
-		// so the manual delete could not work either and recovery meant SM12.
-		_ = c.UnlockObject(ctx, oldURL, oldLockResult.LockHandle)
+		// one does not, and the caller is about to be told to delete the object
+		// by hand — which cannot work while our own session holds a MODIFY lock
+		// on it. The release is the defer above: it runs on a context detached
+		// from the caller's, and it reports a failure instead of dropping it.
+		// Unlocking here as well would send a second UNLOCK for a handle the
+		// first one already consumed, and the resulting error would be reported
+		// as a stranded lock that does not exist.
 		result.Message = fmt.Sprintf("New object %s created successfully, but failed to delete old object %s: %v. Please delete manually.", newName, oldName, err)
 		result.Success = true
 		return result, nil

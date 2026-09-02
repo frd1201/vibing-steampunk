@@ -139,12 +139,17 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/includes/%s", url.PathEscape(includeName))
 	sourceURL := objectURL + "/source/main"
 
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving the
+	// same package again from inside the lock window (issue #91) — the include
+	// path needs it exactly as much as WriteProgram and WriteClass do.
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteInclude",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -178,6 +183,15 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
+
+	// Reuse the request the object is already bound to when the caller supplied no
+	// transport, so an already-captured object is not rejected with a spurious 409
+	// (issue #144). Re-checks transportable-edit policy on the resolved request.
+	transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "WriteInclude")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
 
 	if err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport); err != nil {
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)

@@ -183,9 +183,15 @@ func (c *Client) writeFunctionModule(ctx context.Context, group, name, processin
 		}
 	}
 
+	// Detached from the caller's cancellation for the same reason the defer
+	// above is: a write that finished just as the context expired would
+	// otherwise leave the ENQUEUE behind, because the unlock never leaves the
+	// process. Marked released either way, so the defer does not send a second
+	// UNLOCK for a handle this one already consumed.
 	unlocked = true
-	if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
-		return fmt.Errorf("unlocking function module %s: %w", strings.ToUpper(name), err)
+	if err := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		return fmt.Errorf("unlocking function module %s: %w — %s",
+			strings.ToUpper(name), err, strandedLockAdvice(objectURL, err))
 	}
 	return nil
 }
