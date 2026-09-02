@@ -96,3 +96,52 @@ func TestNoAnswerRefusesToGuessForEveryProbedType(t *testing.T) {
 		})
 	}
 }
+
+// The silent-success class: WriteSource answers a syntax error, a failed
+// activation or an unsupported type with (result{Success:false}, nil). Three
+// deploy loops read only the error and printed "OK" for objects that were
+// never written; Deployed is what they ask now.
+func TestWriteSourceResultDeployed(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  *WriteSourceResult
+		wantOK  bool
+		wantMsg string
+	}{
+		{
+			name:    "a refusal with a reason keeps the reason",
+			result:  &WriteSourceResult{Success: false, Message: "Source has syntax errors - not saved"},
+			wantMsg: "Source has syntax errors - not saved",
+		},
+		{
+			name:    "a refusal with no reason still reads as a failure",
+			result:  &WriteSourceResult{Success: false},
+			wantMsg: "unknown failure",
+		},
+		{
+			// (nil, nil) must not be mistaken for a success by a caller that
+			// only nil-checks the error.
+			name:    "a nil result is a failure, not a success",
+			result:  nil,
+			wantMsg: "unknown failure",
+		},
+		{
+			name:    "a success is a success",
+			result:  &WriteSourceResult{Success: true, Message: "Program updated and activated successfully"},
+			wantOK:  true,
+			wantMsg: "Program updated and activated successfully",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, msg := tt.result.Deployed()
+			if ok != tt.wantOK {
+				t.Errorf("Deployed() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if msg != tt.wantMsg {
+				t.Errorf("Deployed() msg = %q, want %q", msg, tt.wantMsg)
+			}
+		})
+	}
+}

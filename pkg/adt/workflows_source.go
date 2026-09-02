@@ -173,6 +173,27 @@ type WriteSourceResult struct {
 	Message      string              `json:"message,omitempty"`
 }
 
+// Deployed reports whether the write actually landed, and why not when it did
+// not.
+//
+// WriteSource returns most refusals as (result{Success:false}, nil) — a syntax
+// error, a failed activation, an unsupported type — so a caller that reads only
+// the error counts every one of those as a deployed object and prints "OK".
+// Three deploy loops (two in cmd/vsp, one in internal/mcp) each had to know
+// that; now they ask.
+func (r *WriteSourceResult) Deployed() (bool, string) {
+	switch {
+	case r == nil:
+		return false, "unknown failure"
+	case r.Success:
+		return true, r.Message
+	case r.Message != "":
+		return false, r.Message
+	default:
+		return false, "unknown failure"
+	}
+}
+
 // WriteSource is a unified tool for writing ABAP source code across different object types.
 // Replaces WriteProgram, WriteClass, CreateAndActivateProgram, CreateClassWithTests.
 //
@@ -371,6 +392,16 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to create include: %v", err)
 			return result, nil
 		}
+
+		// The include was created in opts.Package, which CreateObject only
+		// accepted after checking it against the whitelist — so neither
+		// WriteInclude's gate nor the UpdateSource inside its lock needs to
+		// resolve the same package again over the wire (issue #91). Every
+		// other create branch here marks the context; this one did not, and a
+		// just-created object is exactly the one SearchObject is least likely
+		// to answer for.
+		ctx = withMutationPackageChecked(ctx, GetObjectURL(ObjectTypeInclude, name, ""))
+
 		inclResult, err := c.WriteInclude(ctx, name, source, opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to write include source: %v", err)

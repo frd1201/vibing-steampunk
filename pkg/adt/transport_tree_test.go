@@ -409,3 +409,40 @@ func TestListTransportsNamedUserStillFilters(t *testing.T) {
 		t.Errorf("expected an AS4USER equality for a named user:\n%s", q)
 	}
 }
+
+// An omitted user means the connection's own, the same default ListTransports
+// has had all along. Without it the E070 fallback refuses the empty name
+// outright, so a caller that used to get an empty list got a hard error
+// instead — and the ADT request went out with no user at all.
+func TestGetUserTransportsDefaultsToTheConnectionUser(t *testing.T) {
+	var gotUser string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/discovery"):
+			w.Header().Set("X-CSRF-Token", "TOKEN")
+		case strings.Contains(r.URL.Path, "/cts/transportrequests"):
+			gotUser = r.URL.Query().Get("user")
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(treeWithoutTargets))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := NewConfig(srv.URL, "testuser", "secret")
+	cfg.Safety.EnableTransports = true
+	client := NewClientWithTransport(cfg, NewTransport(cfg))
+
+	result, err := client.GetUserTransports(context.Background(), "")
+	if err != nil {
+		t.Fatalf("GetUserTransports(\"\"): %v", err)
+	}
+	if gotUser != "TESTUSER" {
+		t.Errorf("ADT request carried user=%q, expected the connection's own user upper-cased", gotUser)
+	}
+	if len(result.Workbench) != 1 || len(result.Customizing) != 1 {
+		t.Errorf("expected 1 workbench and 1 customizing, got %d/%d",
+			len(result.Workbench), len(result.Customizing))
+	}
+}

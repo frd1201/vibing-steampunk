@@ -3489,21 +3489,18 @@ func runInstallZadtVsp(cmd *cobra.Command, args []string) error {
 			Mode:        adt.WriteModeUpsert,
 		}
 		res, err := client.WriteSource(ctx, obj.Type, obj.Name, obj.Source, opts)
-		switch {
-		case err != nil:
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			failed++
-		case res == nil || !res.Success:
-			msg := "unknown failure"
-			if res != nil && res.Message != "" {
-				msg = res.Message
-			}
+			continue
+		}
+		if ok, msg := res.Deployed(); !ok {
 			fmt.Fprintf(os.Stderr, "FAILED: %s\n", msg)
 			failed++
-		default:
-			fmt.Fprintf(os.Stderr, "OK\n")
-			deployed++
+			continue
 		}
+		fmt.Fprintf(os.Stderr, "OK\n")
+		deployed++
 	}
 
 	fmt.Fprintf(os.Stderr, "\n")
@@ -3682,25 +3679,21 @@ func runInstallAbapGit(cmd *cobra.Command, args []string) error {
 			Description: desc,
 			Mode:        adt.WriteModeUpsert,
 		}
-		// WriteSource reports most refusals as (result{Success:false}, nil) —
-		// a syntax error, a failed activation, an unsupported type. Reading
-		// only err counted every one of those as a deployed object.
+		// Reading only err counted a syntax error, a failed activation or an
+		// unsupported type as a deployed object — see WriteSourceResult.Deployed.
 		res, err := client.WriteSource(ctx, obj.Type, obj.Name, obj.MainSource, wopts)
-		switch {
-		case err != nil:
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 			failCount++
-		case res == nil || !res.Success:
-			msg := "unknown failure"
-			if res != nil && res.Message != "" {
-				msg = res.Message
-			}
+			continue
+		}
+		if ok, msg := res.Deployed(); !ok {
 			fmt.Fprintf(os.Stderr, "FAILED: %s\n", msg)
 			failCount++
-		default:
-			fmt.Fprintf(os.Stderr, "OK\n")
-			success++
+			continue
 		}
+		fmt.Fprintf(os.Stderr, "OK\n")
+		success++
 	}
 
 	fmt.Fprintf(os.Stderr, "\nDeployment complete: %d success, %d failed\n", success, failCount)

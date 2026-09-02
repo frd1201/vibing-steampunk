@@ -440,21 +440,18 @@ func (s *Server) handleInstallZADTVSP(ctx context.Context, request mcp.CallToolR
 			Mode:        adt.WriteModeUpsert,
 		}
 		res, err := s.adtClient.WriteSource(ctx, obj.Type, obj.Name, obj.Source, opts)
-		switch {
-		case err != nil:
+		if err != nil {
 			fmt.Fprintf(&sb, "✗ Failed: %v\n", err)
 			failed = append(failed, obj.Name+": "+err.Error())
-		case res == nil || !res.Success:
-			msg := "unknown failure"
-			if res != nil && res.Message != "" {
-				msg = res.Message
-			}
+			continue
+		}
+		if ok, msg := res.Deployed(); !ok {
 			fmt.Fprintf(&sb, "✗ Failed: %s\n", msg)
 			failed = append(failed, obj.Name+": "+msg)
-		default:
-			sb.WriteString("✓ Deployed\n")
-			deployed = append(deployed, obj.Name)
+			continue
 		}
+		sb.WriteString("✓ Deployed\n")
+		deployed = append(deployed, obj.Name)
 	}
 
 	sb.WriteString("\n")

@@ -932,6 +932,16 @@ whose shape we had wrong is how this note started.
 
 ## Still open, smaller
 
+- **`packageExists` answers "yes" to every name.** `pkg/adt/crud.go` — the
+  guard in `CreateObject` that exists to stop SAP leaving an orphan ENQUEUE
+  behind a create into a package that is not there. Nodestructure returns a
+  200 and an empty tree for a missing package and for an existing empty one
+  alike, and `GetPackage` never returns a nil result on success, so the guard
+  cannot fire and pays a full package listing per created object to reach that
+  answer. `Client.PackageExists` can tell the two apart — but on a release
+  without `/sap/bc/adt/packages` its 404 means "no such resource", not "no such
+  package", and swapping it in would block every create instead of merely
+  failing to prevent a lock. Needs a 7.40 to decide. Recorded at the function.
 - **AMDP table contents.** Address right, HANA's `INIT` refuses. Untried: the
   `tableHandle` the stop reports, which appears in none of that resource's
   parameters and so may belong to another route.

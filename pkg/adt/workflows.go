@@ -71,11 +71,14 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 		return result, nil
 	}
 
-	// Ensure we unlock on any error
+	// Ensure we unlock on any error. Detached from the caller's cancellation,
+	// and reported rather than dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -96,12 +99,15 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	}
 
 	// Step 4: Unlock before activation (SAP requirement)
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, programName)
@@ -180,7 +186,15 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			// Detached from the caller's cancellation, and reported rather
+			// than dropped: when the write failed *because* the context was
+			// cancelled or hit its deadline, an unlock on that same context
+			// dies inside http.NewRequestWithContext without sending a byte
+			// and the ENQUEUE stays on the include. The caller's only evidence
+			// of that is this message.
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -198,11 +212,15 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 		return result, nil
 	}
 
-	if err = c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	activation, err := c.Activate(ctx, objectURL, includeName)
 	if err != nil {
@@ -280,10 +298,14 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 		return result, nil
 	}
 
+	// Detached from the caller's cancellation, and reported rather than
+	// dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -304,12 +326,15 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	}
 
 	// Step 4: Unlock
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, className)
@@ -390,10 +415,14 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		return result, nil
 	}
 
+	// Detached from the caller's cancellation, and reported rather than
+	// dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -405,12 +434,15 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 	}
 
 	// Step 4: Unlock
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, programName)
@@ -492,10 +524,14 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		return result, nil
 	}
 
+	// Detached from the caller's cancellation, and reported rather than
+	// dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -521,12 +557,15 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 	}
 
 	// Step 6: Unlock
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 7: Activate
 	activation, err := c.Activate(ctx, objectURL, className)

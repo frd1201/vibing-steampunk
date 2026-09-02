@@ -37,6 +37,30 @@ func (c *Client) releaseLockAfterFailure(ctx context.Context, objectURL, lockHan
 	return c.UnlockObject(releaseCtx, objectURL, lockHandle)
 }
 
+// ReleaseLock is the exported form of releaseLockAfterFailure, for callers
+// outside this package that drive LOCK -> UpdateSource -> UNLOCK by hand — the
+// MCP deploy handlers, in the same way PrepareSourceUpdate is the exported form
+// of the gate that belongs above their lock. Without it those handlers were the
+// last compensating unlocks still bound to the caller's cancellation, which is
+// exactly the case that strands the ENQUEUE.
+func (c *Client) ReleaseLock(ctx context.Context, objectURL, lockHandle string) error {
+	return c.releaseLockAfterFailure(ctx, objectURL, lockHandle)
+}
+
+// joinMessage appends a second sentence to a result message that may be empty,
+// so a stranded-lock warning never arrives as a bare " — advice" with nothing
+// in front of the dash.
+func joinMessage(message, extra string) string {
+	switch {
+	case extra == "":
+		return message
+	case message == "":
+		return extra
+	default:
+		return message + " — " + extra
+	}
+}
+
 // strandedLockAdvice explains an unlock that failed, in the terms a user needs
 // to act on it.
 //
