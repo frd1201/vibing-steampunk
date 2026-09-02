@@ -27,8 +27,25 @@ type LockResult struct {
 // LockObject acquires an edit lock on an ABAP object.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/programs/programs/ZTEST")
 // accessMode is typically "MODIFY" for editing
-// transport is the transport task number (corrNr / Aufgabe) — required for objects in transportable packages
-func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, transport string) (*LockResult, error) {
+//
+// corrNr is the transport task number (Aufgabe). ADT expects it on the LOCK
+// request for objects in transportable packages, not only on the write that
+// follows, and passing it here is what makes such an object lockable at all.
+//
+// It is variadic rather than a fourth positional parameter on purpose. This
+// fork sends corrNr at LOCK time; upstream does not, so every upstream call
+// site is written three-argument. A fixed fourth parameter turns each of those
+// into a build break that arrives with the next merge — twice already, once in
+// a file that merged without a conflict at all. Variadic costs one line here
+// and makes both spellings compile.
+//
+// Only the first value is read; further ones are ignored, because there is no
+// meaning to give them.
+func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, corrNr ...string) (*LockResult, error) {
+	transport := ""
+	if len(corrNr) > 0 {
+		transport = corrNr[0]
+	}
 	// Safety check - only check for MODIFY locks, READ locks are safe
 	if accessMode == "" || accessMode == "MODIFY" {
 		if err := c.checkSafety(OpLock, "LockObject"); err != nil {
