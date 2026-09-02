@@ -78,6 +78,12 @@ func (c *Client) CreateFromFile(ctx context.Context, filePath, packageName, tran
 		return nil, err
 	}
 
+	// CreateObject accepted packageName against the whitelist and SAP put the
+	// object there, so UpdateSource below need not resolve the same package
+	// again — which it would do from inside the lock, ending the session the
+	// lock handle belongs to (issue #91).
+	ctx = withMutationPackageChecked(ctx, objectURL)
+
 	// 5. Syntax check, before the lock and deliberately so. A syntax check does
 	// not need one, and it is a *stateless* request: sent while a lock is held it
 	// ends the stateful session the lock lives in, and the write that follows
@@ -249,6 +255,23 @@ func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string)
 		return nil, err
 	}
 
+	// The full mutation gate for the object, run here — above the lock — for
+	// the same reason the syntax check moved above it: the package lookup it
+	// performs is a stateless request, and the write under the lock would
+	// otherwise trigger it mid-window and lose the handle (issue #91).
+	// UpdateFromFile previously only ran the op-type check, so this also
+	// closes the path's package check rather than leaving it to the inner
+	// mutator.
+	ctx, err = c.gateAndMark(ctx, MutationContext{
+		Op:        OpUpdate,
+		OpName:    "UpdateFromFile",
+		ObjectURL: objectURL,
+		Transport: transport,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	// 4. Syntax check first — see the note above: a stateless request sent while
 	// the object is locked ends the session the lock belongs to.
 	if !isClassInclude {
@@ -303,6 +326,22 @@ func (c *Client) UpdateFromFile(ctx context.Context, filePath, transport string)
 			_ = c.UnlockObject(ctx, objectURL, lockResult.LockHandle)
 		}
 	}()
+
+	// Reuse the request the object is already bound to when the caller supplied no
+	// transport, so an already-captured object is not rejected with a spurious 409
+	// (issue #144). Re-checks transportable-edit policy on the resolved request.
+	transport, err = c.resolveWriteTransport(transport, lockResult.CorrNr, "UpdateFromFile")
+	if err != nil {
+		return &DeployResult{
+			FilePath:   filePath,
+			ObjectURL:  objectURL,
+			ObjectName: info.ObjectName,
+			ObjectType: string(info.ObjectType),
+			Success:    false,
+			Errors:     []string{fmt.Sprintf("transportable-edit check failed: %v", err)},
+			Message:    fmt.Sprintf("Transportable-edit check failed: %v", err),
+		}, nil
+	}
 
 	// 6. Write source
 	if isClassInclude {

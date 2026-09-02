@@ -640,10 +640,43 @@ func TestLockObject_PassesThroughModificationSupport(t *testing.T) {
 	}
 }
 
-// TestLockObject_AllowsNoModificationOnReadLock exercises the READ access
-// mode path, which skips the OpLock safety check. Kept as a companion to
-// TestLockObject_PassesThroughModificationSupport so the READ branch
-// keeps explicit coverage for the same metadata-only behaviour.
+// TestLockObject_SurfacesEnqueueConflict covers the EU510 case: another
+// session (often a dead one of our own) still holds the ENQUEUE, and ADT
+// answers _action=LOCK with an exception document. Parsed as a lock result
+// that used to degrade into an empty LockResult and a misleading
+// "NoModification" report; the real message must reach the caller.
+func TestLockObject_SurfacesEnqueueConflict(t *testing.T) {
+	const conflictXML = `<?xml version="1.0" encoding="utf-8"?><exc:exception xmlns:exc="http://www.sap.com/abapxml/types/communicationframework"><namespace id="com.sap.adt"/><type id="ExceptionResourceNoAccess"/><message lang="EN">User TESTUSER is currently editing ZCL_DEMO_LOCKED</message></exc:exception>`
+	mock := &methodPathMock{
+		routes: []routedResponse{
+			resp("", "discovery", 200, "ok"),
+			resp(http.MethodPost, "/oo/classes/ZCL_DEMO_LOCKED", 200, conflictXML),
+		},
+	}
+	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
+	transport := NewTransportWithClient(cfg, mock)
+	client := NewClientWithTransport(cfg, transport)
+
+	_, err := client.LockObject(
+		context.Background(),
+		"/sap/bc/adt/oo/classes/ZCL_DEMO_LOCKED",
+		"MODIFY",
+	)
+	if err == nil {
+		t.Fatal("LockObject should have returned an error for an ADT exception, got nil")
+	}
+	if !strings.Contains(err.Error(), "currently editing") {
+		t.Errorf("error = %q, want SAP's own EU510 message", err.Error())
+	}
+	if !strings.Contains(err.Error(), "ExceptionResourceNoAccess") {
+		t.Errorf("error = %q, want the ADT exception type", err.Error())
+	}
+}
+
+// TestLockObject_AllowsNoModificationOnReadLock proves the guard is
+// scoped to MODIFY locks — read-only locks (accessMode != MODIFY)
+// must still succeed even if the system flags the object as not
+// modifiable, because there is no write to fail downstream.
 func TestLockObject_AllowsNoModificationOnReadLock(t *testing.T) {
 	const noModLockXML = `<?xml version="1.0" encoding="UTF-8"?>
 <asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">

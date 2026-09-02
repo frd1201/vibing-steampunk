@@ -206,8 +206,9 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 	if isModifyingMethod(opts.Method) {
 		token := t.getCSRFToken()
 		if token == "" {
-			// Fetch CSRF token first
-			if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
+			// Fetch CSRF token first, on the same kind of session the request
+			// itself will use (issue #91).
+			if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
 				return nil, fmt.Errorf("fetching CSRF token: %w", err)
 			}
 			token = t.getCSRFToken()
@@ -251,8 +252,11 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 
 	// Handle CSRF token refresh on 403
 	if resp.StatusCode == http.StatusForbidden && isModifyingMethod(opts.Method) {
-		// Try to refresh CSRF token and retry once
-		if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
+		// Try to refresh CSRF token and retry once. The refresh has to stay on
+		// the request's own session kind: for a stateful write it lands between
+		// the failed attempt and the retry, and an unmarked probe there retires
+		// the session the lock handle belongs to (issue #91).
+		if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
 			return nil, fmt.Errorf("refreshing CSRF token: %w", err)
 		}
 
@@ -289,7 +293,7 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 			t.setSessionID("")
 			t.clearSAPSessionCookies()
 			// Fetch new CSRF token (this establishes a new session)
-			if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
+			if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
 				return nil, fmt.Errorf("refreshing session after timeout: %w", err)
 			}
 			// Retry the request
@@ -310,7 +314,7 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 				}
 			} else {
 				// Basic auth: just refresh CSRF token.
-				if err := t.fetchCSRFToken(ctx, opts.Stateful || t.sessionTypeIsStateful()); err != nil {
+				if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
 					return nil, fmt.Errorf("re-authenticating after 401 on %s: %w (original error: %v)", path, err, apiErr)
 				}
 			}
@@ -397,15 +401,21 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 // short-circuiting there reintroduced exactly the unusability the fallback
 // exists to prevent. Let GET have its turn; if it is also forbidden, the error
 // below says so.
+func (t *Transport) fetchCSRFToken(ctx context.Context) error {
+	return t.fetchCSRFTokenFor(ctx, false)
+}
+
+// fetchCSRFTokenFor fetches a token on behalf of a request whose statefulness
+// is known.
 //
-// stateful marks the probe as belonging to a stateful session. It matters
-// because of *when* this runs: the 403-CSRF-refresh and session-expiry paths
-// fire from inside Request, which is reached with a lock held. An unmarked
-// probe is a stateless request, SAP retires the ICM context the lock lives in,
-// and the write that follows comes back 423 InvalidLockHandle — the same bug
-// class as the SyntaxCheck-under-lock hop that moved before the lock. Callers
-// that hold no session (a fresh re-auth) pass false.
-func (t *Transport) fetchCSRFToken(ctx context.Context, stateful bool) error {
+// A token fetch triggered from inside Request — no cached token, a 403 refresh,
+// a session-expiry retry — lands in the middle of whatever that request is
+// doing. If that request is the write that consumes a lock handle, a probe sent
+// without the stateful marker is answered on a different ADT context and the
+// stateful one is retired: the retry then presents a handle whose session has
+// just been thrown away (issue #91). So the probe inherits the in-flight
+// request's statefulness rather than only the client-wide default.
+func (t *Transport) fetchCSRFTokenFor(ctx context.Context, stateful bool) error {
 	return t.fetchCSRFTokenWithReauth(ctx, true, stateful)
 }
 
@@ -414,7 +424,7 @@ func (t *Transport) fetchCSRFToken(ctx context.Context, stateful bool) error {
 //
 // allowReauth exists to break a cycle: re-authenticating ends with a token
 // fetch of its own, and that fetch must not start another re-authentication.
-func (t *Transport) fetchCSRFTokenWithReauth(ctx context.Context, allowReauth, stateful bool) error {
+func (t *Transport) fetchCSRFTokenWithReauth(ctx context.Context, allowReauth bool, stateful bool) error {
 	token, status, redirected, err := t.probeCSRFToken(ctx, http.MethodHead, stateful)
 	if err != nil {
 		return err
@@ -487,12 +497,18 @@ func (t *Transport) probeCSRFToken(ctx context.Context, method string, stateful 
 	t.addCookies(req)
 	req.Header.Set("X-CSRF-Token", "fetch")
 	req.Header.Set("Accept", "*/*")
-	// The header is only ever *added* here, never set to "stateless": an
-	// unmarked probe is what the server already assumed, so leaving it off
-	// keeps the previous behaviour for callers that hold no session, while a
-	// probe fired from inside a locked window no longer retires the context
-	// that lock lives in.
-	if stateful {
+	// Only ever *add* the stateful marker; never stamp an explicit "stateless"
+	// here. The keep-alive ping goes through this same probe (Ping ->
+	// fetchCSRFToken), and an explicitly stateless keep-alive would retire the
+	// session on a timer — the very failure this is guarding against.
+	//
+	// The configured half of the test is sessionTypeIsStateful rather than a
+	// bare SessionType == SessionStateful: this fork also has SessionKeep, and
+	// the whole point of that mode is that it goes stateful once a session
+	// exists. Comparing against SessionStateful alone would leave the probe
+	// unmarked in exactly the configuration a user reaches for when they are
+	// already fighting lock-handle errors.
+	if stateful || t.sessionTypeIsStateful() {
 		req.Header.Set("X-sap-adt-sessiontype", "stateful")
 	}
 
@@ -774,8 +790,9 @@ func IsSessionExpiredError(err error) bool {
 // It refreshes the CSRF token as a side effect.
 func (t *Transport) Ping(ctx context.Context) error {
 	// The keep-alive must not be the request that ends the session it is
-	// keeping alive, so it inherits the transport's own stateful posture.
-	return t.fetchCSRFToken(ctx, t.sessionTypeIsStateful())
+	// keeping alive. fetchCSRFToken consults sessionTypeIsStateful itself, so
+	// the transport's own posture is already in the probe.
+	return t.fetchCSRFToken(ctx)
 }
 
 // CheckSession reports whether this client has a usable, authenticated ADT
@@ -835,6 +852,8 @@ func (t *Transport) callReauthFunc(ctx context.Context) error {
 	// Fetch CSRF token with the new cookies.
 	// Set lastReauth only after CSRF succeeds — if it fails, the next
 	// goroutine should retry rather than hitting the cooldown skip.
+	// Re-auth establishes a brand-new session; there is no lock window to
+	// preserve across it, so this stays on the client-wide default.
 	if err := t.fetchCSRFTokenWithReauth(reauthCtx, false, false); err != nil {
 		return err
 	}

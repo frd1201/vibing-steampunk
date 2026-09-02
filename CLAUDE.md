@@ -13,39 +13,62 @@
 
 ## Current Priorities
 
-### 1. Graph Engine (`pkg/graph/`) — In Progress
-This section understated the package for four months; corrected 2026-08-24,
-re-counted 2026-08-28 against the upstream merge.
+### 1. Graph Engine (`pkg/graph/`) — Feature-complete
+This section understated the package for four months; corrected 2026-08-24. It
+then went stale again the other way — it listed D010INC and `ExtractEffects` as
+pending for a week after both shipped on 2026-08-25. Corrected 2026-09-02.
 - Done: core types, parser dep extraction, boundary analyzer, **SQL adapters
   (`builder_sql.go` — CROSS + WBCROSSGT + WBCROSSGTX long names)**,
-  `builder_transport.go`, `builder_config.go`, **`builder_loads.go` (D010INC —
-  the compile-time load graph, behind `vsp loads`)**, and the `queries_*.go`
-  surface behind slim / health / impact / api-surface / rename / examples.
+  `builder_transport.go`, `builder_config.go`, and the `queries_*.go` surface
+  behind slim / health / impact / api-surface / rename / examples.
   51 files, 218 test functions.
+- Done 2026-08-25: **D010INC**, the compile-time *load* graph — the one novel
+  source in the original design — is `builder_loads.go`, reachable as
+  `vsp loads`. And `graph.ExtractEffects` (side effects / LUW) has callers at
+  last: `cmd/vsp/effects.go:82` and `internal/mcp/handlers_effects.go:100`.
+  Both were described here as unwired for the four months they sat unused.
+- Pending: unify `cli_deps.go` + `cli_extra.go` + `ctxcomp/analyzer.go`. Two of
+  the three now import `pkg/graph` (`cli_extra.go:16`, `analyzer.go:9`); only
+  `cli_deps.go` still carries its own extraction.
 - Pending: **ADT adapters** — `SourceADTCallGraph`, `SourceADTWhereUsed` and
-  `SourceADTCDSDeps` are declared in `graph.go` and no builder produces them.
-  Also: unify `cli_deps.go` + `cli_extra.go` + `ctxcomp/analyzer.go`, which
-  still do not import `pkg/graph`.
-- Now wired (was listed here as caller-less): `graph.ExtractEffects` reaches
-  users through `vsp effects` (`cmd/vsp/effects.go`) and the MCP effects
-  handler (`internal/mcp/handlers_effects.go`).
+  `SourceADTCDSDeps` are declared in `graph.go` (`graph.go:37`) and no builder
+  produces them. Verified still true 2026-09-02.
 - Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md)
 
 ### 2. GUI Debugger (Issue #2) — Strategic
 Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
 
 ### 3. Open Issues
-- **#88** Lock handle bug — *partly* closed. The stateful-session half holds
-  (`Stateful: true` on LOCK). The `ModificationSupport` guard from `22517d4` is
-  **gone**: it read `NoModification` as "read-only" when the SAP constant means
-  "tracking not needed", made every local object unwritable, and leaked the
-  ENQUEUE on the way out. `pkg/adt/crud.go` now guards on an empty
-  `LOCK_HANDLE` instead. The remaining half of the bug class is any *stateless*
-  request issued between LOCK and write — `SyntaxCheck` was moved before the
-  lock, and the package-safety search now runs stateful for the same reason.
-  Anything new added inside a locked window needs the same care.
-- **#55** RunReport in APC — architectural limit
-- **#46, #45** Sync script — low effort
+- **#91** The 423 lock-handle class — the live one, and this entry was wrong
+  twice. `22517d4` did not close it: a third-party release bisect names that
+  commit as the start of a regression, and its `ModificationSupport` guard was
+  itself removed by `9b98997`. #88, #92, #98, #110 are closed as duplicates of
+  #91 (2026-09-01); #132 stays open for its transport-reuse leg.
+  Cause: `SessionType` defaults to stateless (`config.go:198`, `d84db03`) and
+  `http.go:502` stamps every unflagged request `stateless`, so any hop between
+  LOCK and the write retires the ICM context and kills the handle. The fix on
+  `fix/91-session-affinity` closes the package-lookup hop, the CSRF probe, and
+  two mutations that were themselves stateless. Still open after it: the
+  keep-alive ticker (on by default, 5m) and the MCP cross-tool-call window.
+- **#166** A failed mutation strands the SAP-side ENQUEUE — split out of #92
+  so it survives that closure. Users clear these by hand in SM12.
+- **#55** RunReport in APC — *not* an architectural limit, which this line
+  claimed for months. `34eb727` ("$ZADT_VSP sync", 2026-02-06) replaced a
+  working XBP background-job + spool implementation in
+  `src/zcl_vsp_report_service.clas.abap` with a bare `SUBMIT ... AND RETURN`,
+  deleting the `getJobStatus`/`getSpoolOutput` actions the Go client still
+  speaks. It is a regression with a known good parent commit. #113 was the
+  same defect and is closed against this one.
+- ~~**#46, #45** Sync script~~ — closed 2026-09-01. `scripts/sync-upstream.sh`
+  has never existed here (`git log --all --diff-filter=A` finds it in none of
+  the 913 commits); both issues were filed from a downstream fork's workflow.
+  This line advertised work that was not ours to do.
+- **#88** is closed upstream as a duplicate of #91. The half this fork owns is
+  still live in the code: `pkg/adt/crud.go` guards on an empty `LOCK_HANDLE`
+  rather than on `ModificationSupport`, and `SyntaxCheck` runs before the lock.
+  Upstream's per-object package-check marker (`mutation_gate_marker.go`) now
+  covers the package lookup that used to run inside the window. Anything new
+  added between LOCK and write still needs the same care.
 
 ---
 
@@ -243,7 +266,7 @@ successors; do not add more.
 
 | Area | Risk | Notes |
 |------|------|-------|
-| `pkg/graph/` | Adapters incomplete | Parser + CROSS/WBCROSSGT/D010INC/config/transport builders exist; the three `SourceADT*` constants have no builder |
+| `pkg/graph/` | Adapters incomplete | Parser + CROSS/WBCROSSGT/D010INC/config/transport builders all exist with tests; the three `SourceADT*` constants still have no builder |
 | Dep logic duplication | Three implementations | `cli_deps.go`, `cli_extra.go` and `ctxcomp/analyzer.go` each predate `pkg/graph/`; changing one does not change the others |
 | `pkg/abaplint/lint.go` | Silent no-op | 5 of 13 rules (`select_star`, `hardcoded_credentials`, `catch_cx_root`, `commit_in_loop`, `dynamic_call_no_try`) are not in `defaultRules()` and never run |
 | `*_test.go` named `fork_corrections` | Fork-only guard rails | `pkg/adt/` and `internal/mcp/` each carry one. They pin corrections upstream does not have (INCL write, Secure-cookie stripping, `SAP_SESSION_TYPE`, the CSRF GET fallback). Do not delete them to make an upstream merge quieter — that is exactly what they exist to catch |
@@ -251,7 +274,7 @@ successors; do not add more.
 | `pkg/cache/` | cgo-dependent | SQLite backend needs a C compiler; without one `cmd/vsp` and `pkg/cache` tests fail by design |
 | `handlers_debugger.go` | ADT over a held session | Breakpoints and the debug loop both go through `/sap/bc/adt/debugger*` on the session in `handlers_debug_session.go`. The old "REST breakpoints 403 on newer SAP" was the stateless client, not the release |
 | `handlers_amdp.go` | Experimental | Session works, breakpoints unreliable |
-| `pkg/adt/ui5.go` | Read-only | Write needs `/UI5/CL_REPOSITORY_LOAD` |
+| `pkg/adt/ui5.go` | Writes, ungated by package | Not read-only, and has not been since v2.10.0 (2025-12-05): `UI5UploadFile:273`, `UI5DeleteFile:312`, `UI5CreateApp:345`, `UI5DeleteApp:387`, all MCP-reachable via `handlers_ui5.go`. They go through the ADT filestore, not `/UI5/CL_REPOSITORY_LOAD`. The real hazard is `mutation_gate.go:117` — with `--allowed-packages` set, every UI5 mutation is refused outright because app→package resolution is unimplemented |
 | `pkg/llvm2abap/`, `pkg/wasmcomp/` | Research | Not production; don't treat as stable |
 | `pkg/adt/debugger.go` (REST) | Types and parsers only | Its *client* methods still assume a stateless session; the request builders and parsers are shared and exported via `debugger_parse.go` |
 | `docs/cli-agents/*` | Config drift | Codex TOML format may differ from Claude/Gemini JSON docs |

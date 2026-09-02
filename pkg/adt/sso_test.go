@@ -264,7 +264,7 @@ func TestReissuedSessionCookieReplacesTheHeldOne(t *testing.T) {
 	)
 	transport := NewTransportWithClient(cfg, &reissuingClient{newSession: "fresh"})
 
-	if err := transport.fetchCSRFToken(context.Background(), false); err != nil {
+	if err := transport.fetchCSRFToken(context.Background()); err != nil {
 		t.Fatalf("fetchCSRFToken: %v", err)
 	}
 

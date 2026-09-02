@@ -1035,10 +1035,10 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 				mcp.Description("For SRVB: the service definition name to bind"),
 			),
 			mcp.WithString("binding_version",
-				mcp.Description("For SRVB: OData version 'V2' or 'V4' (default: V2)"),
+				mcp.Description("For SRVB: OData version 'V2' or 'V4'. Defaults to 'V2' - pass 'V4' explicitly for Fiori Elements V4 apps, otherwise a V2 binding is created silently."),
 			),
 			mcp.WithString("binding_category",
-				mcp.Description("For SRVB: '0' for Web API, '1' for UI (default: 0)"),
+				mcp.Description("For SRVB: '0' = UI (User Interface), '1' = A2X (Web API). Default: '0' (UI). Values follow SAP domain SRVB_BND_CATEGORY."),
 			),
 		), s.handleCreateObject)
 	}
@@ -1213,7 +1213,7 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 			mcp.WithDescription("Get all transport requests for a user (requires --enable-transports flag). Returns both workbench and customizing requests grouped by target system."),
 			mcp.WithString("user_name",
 				mcp.Required(),
-				mcp.Description("SAP user name (will be converted to uppercase)"),
+				mcp.Description("SAP user name (will be converted to uppercase), or '*' for every user"),
 			),
 		), s.handleGetUserTransports)
 	}
