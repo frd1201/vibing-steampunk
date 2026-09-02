@@ -1342,16 +1342,16 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	// creating a table failed with 423 InvalidLockHandle on every attempt, on
 	// any configuration. UpdateSource is the same request with Stateful: true
 	// and the mutation gate attached.
-	if err := c.UpdateSource(ctx, sourceURL, ddlSource, lock.LockHandle, opts.Transport); err != nil {
+	if updateErr := c.UpdateSource(ctx, sourceURL, ddlSource, lock.LockHandle, opts.Transport); updateErr != nil {
 		if unlockErr := c.releaseLockAfterFailure(ctx, tableURL, lock.LockHandle); unlockErr != nil {
-			return fmt.Errorf("updating table source: %w — %s", err, strandedLockAdvice(tableURL, unlockErr))
+			return fmt.Errorf("updating table source: %w — %s", updateErr, strandedLockAdvice(tableURL, unlockErr))
 		}
-		return fmt.Errorf("updating table source: %w", err)
+		return fmt.Errorf("updating table source: %w", updateErr)
 	}
 
 	// Unlock BEFORE activation
-	if err := c.UnlockObject(ctx, tableURL, lock.LockHandle); err != nil {
-		return fmt.Errorf("unlocking table before activation: %w — %s", err, strandedLockAdvice(tableURL, err))
+	if unlockErr := c.UnlockObject(ctx, tableURL, lock.LockHandle); unlockErr != nil {
+		return fmt.Errorf("unlocking table before activation: %w — %s", unlockErr, strandedLockAdvice(tableURL, unlockErr))
 	}
 
 	// Step 3: Activate

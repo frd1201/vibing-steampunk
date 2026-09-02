@@ -47,7 +47,7 @@ func TestPublishedToolCountsMatchPinnedCounts(t *testing.T) {
 		wantExpertTools:       "expert",
 	}
 
-	var allowedList []string
+	allowedList := make([]string, 0, len(allowed))
 	for n, mode := range allowed {
 		allowedList = append(allowedList, fmt.Sprintf("%d (%s)", n, mode))
 	}

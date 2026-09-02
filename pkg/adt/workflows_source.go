@@ -855,16 +855,17 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			// under the lock — a stateless lookup there retires the session the
 			// handle belongs to (issue #91). This is the full gate, so nothing
 			// is skipped, only moved out of the window.
-			ctx, err := c.gateAndMark(ctx, MutationContext{
+			gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
 				Op:        OpUpdate,
 				OpName:    "WriteSource",
 				ObjectURL: objectURL,
 				Transport: opts.Transport,
 			})
-			if err != nil {
-				result.Message += fmt.Sprintf(" (Warning: test include not written: %v)", err)
+			if gateErr != nil {
+				result.Message += fmt.Sprintf(" (Warning: test include not written: %v)", gateErr)
 				return result, nil
 			}
+			ctx = gatedCtx
 
 			// Lock for test update
 			lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
@@ -931,15 +932,16 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		// Full gate, run here rather than inside UpdateSource under the lock
 		// (issue #91). Nothing is skipped — the package lookup is only moved
 		// out of the lock window.
-		ctx, err := c.gateAndMark(ctx, MutationContext{
+		gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
 			Op:        OpUpdate,
 			OpName:    "WriteSource",
 			ObjectURL: objectURL,
 			Transport: opts.Transport,
 		})
-		if err != nil {
-			return nil, err
+		if gateErr != nil {
+			return nil, gateErr
 		}
+		ctx = gatedCtx
 
 		// Syntax check
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
@@ -1037,15 +1039,16 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		// Full gate, run here rather than inside UpdateSource under the lock
 		// (issue #91). Nothing is skipped — the package lookup is only moved
 		// out of the lock window.
-		ctx, err := c.gateAndMark(ctx, MutationContext{
+		gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
 			Op:        OpUpdate,
 			OpName:    "WriteSource",
 			ObjectURL: objectURL,
 			Transport: opts.Transport,
 		})
-		if err != nil {
-			return nil, err
+		if gateErr != nil {
+			return nil, gateErr
 		}
+		ctx = gatedCtx
 
 		// Syntax check
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
@@ -1142,15 +1145,16 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 
 	// Full gate up front, so UpdateSource does not repeat the networked
 	// package lookup between the LOCK and the PUT (issue #91).
-	ctx, err := c.gateAndMark(ctx, MutationContext{
+	gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
 		Op:        OpUpdate,
 		OpName:    "WriteSource",
 		ObjectURL: objectURL,
 		Transport: transport,
 	})
-	if err != nil {
-		return nil, err
+	if gateErr != nil {
+		return nil, gateErr
 	}
+	ctx = gatedCtx
 
 	// Get method boundaries
 	methods, err := c.GetClassMethods(ctx, className)

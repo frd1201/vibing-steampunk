@@ -236,11 +236,11 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 		// wire — a stateless request that retires the session the lock handle
 		// belongs to, so the upload comes back 423 (issue #91). The returned
 		// context carries the result of that check for this object only.
-		objCtx, err := s.adtClient.PrepareSourceUpdate(ctx, objectURL, "")
-		if err != nil {
-			fmt.Fprintf(&sb, "BLOCKED: %v\n", err)
+		objCtx, gateErr := s.adtClient.PrepareSourceUpdate(ctx, objectURL, "")
+		if gateErr != nil {
+			fmt.Fprintf(&sb, "BLOCKED: %v\n", gateErr)
 			uploadFailed++
-			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: %v", obj.Type, obj.Name, err))
+			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: %v", obj.Type, obj.Name, gateErr))
 			continue
 		}
 

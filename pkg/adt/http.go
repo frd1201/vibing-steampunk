@@ -208,8 +208,8 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 		if token == "" {
 			// Fetch CSRF token first, on the same kind of session the request
 			// itself will use (issue #91).
-			if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
-				return nil, fmt.Errorf("fetching CSRF token: %w", err)
+			if tokenErr := t.fetchCSRFTokenFor(ctx, opts.Stateful); tokenErr != nil {
+				return nil, fmt.Errorf("fetching CSRF token: %w", tokenErr)
 			}
 			token = t.getCSRFToken()
 		}
