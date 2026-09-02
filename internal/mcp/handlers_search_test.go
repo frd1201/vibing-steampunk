@@ -13,6 +13,8 @@ import (
 // through SearchObjectByType: the short-form type is canonicalized and sent to
 // the server as the objectType query param, and maxResults is forwarded — so
 // max applies after the type filter (the bug txape10 flagged on PR #126).
+// The handler asks for one more than requested (see handleSearchObject) so it
+// can tell a full page from a truncated one; that over-fetch applies here too.
 func TestHandleSearchObject_ServerSideTypeFilter(t *testing.T) {
 	var searchQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -173,6 +173,27 @@ type WriteSourceResult struct {
 	Message      string              `json:"message,omitempty"`
 }
 
+// Deployed reports whether the write actually landed, and why not when it did
+// not.
+//
+// WriteSource returns most refusals as (result{Success:false}, nil) — a syntax
+// error, a failed activation, an unsupported type — so a caller that reads only
+// the error counts every one of those as a deployed object and prints "OK".
+// Three deploy loops (two in cmd/vsp, one in internal/mcp) each had to know
+// that; now they ask.
+func (r *WriteSourceResult) Deployed() (bool, string) {
+	switch {
+	case r == nil:
+		return false, "unknown failure"
+	case r.Success:
+		return true, r.Message
+	case r.Message != "":
+		return false, r.Message
+	default:
+		return false, "unknown failure"
+	}
+}
+
 // WriteSource is a unified tool for writing ABAP source code across different object types.
 // Replaces WriteProgram, WriteClass, CreateAndActivateProgram, CreateClassWithTests.
 //
@@ -232,7 +253,7 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 	case "PROG", "CLAS", "INTF", "INCL", "DDLS", "BDEF", "SRVD", "SRVB", "TABL":
 		// Supported types
 	default:
-		result.Message = fmt.Sprintf("Unsupported object type: %s (supported: PROG, CLAS, INTF, INCL, FUNC, DDLS, BDEF, SRVD, SRVB, TABL)", objectType)
+		result.Message = fmt.Sprintf("Unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, INCL, DDLS, BDEF, SRVD, SRVB, TABL)", objectType)
 		return result, nil
 	}
 
@@ -371,6 +392,16 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to create include: %v", err)
 			return result, nil
 		}
+
+		// The include was created in opts.Package, which CreateObject only
+		// accepted after checking it against the whitelist — so neither
+		// WriteInclude's gate nor the UpdateSource inside its lock needs to
+		// resolve the same package again over the wire (issue #91). Every
+		// other create branch here marks the context; this one did not, and a
+		// just-created object is exactly the one SearchObject is least likely
+		// to answer for.
+		ctx = withMutationPackageChecked(ctx, GetObjectURL(ObjectTypeInclude, name, ""))
+
 		inclResult, err := c.WriteInclude(ctx, name, source, opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to write include source: %v", err)
@@ -444,6 +475,12 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to create interface: %v", err)
 			return result, nil
 		}
+
+		// The interface was created in opts.Package, which CreateObject only
+		// accepted after checking it against the whitelist — so UpdateSource
+		// need not resolve the same package again from inside the lock, where
+		// the lookup would retire the lock handle's session (issue #91).
+		ctx = withMutationPackageChecked(ctx, objectURL)
 
 		// Write source (using WriteProgram logic for interface)
 		sourceURL := objectURL + "/source/main"
@@ -547,6 +584,12 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to create %s: %v", objectType, err)
 			return result, nil
 		}
+
+		// Created in opts.Package, which CreateObject checked against the
+		// whitelist. Both branches below (BDEF shell fill, DDLS/SRVD source
+		// write) then lock and call UpdateSource; without this mark each would
+		// resolve the package again mid-window and lose the handle (#91).
+		ctx = withMutationPackageChecked(ctx, objectURL)
 
 		// For BDEF, creation creates empty shell, then update source
 		if objectType == "BDEF" {
@@ -807,6 +850,23 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		if opts.TestSource != "" {
 			objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(name))
 
+			// Run the package check for the class here, above the lock, rather
+			// than letting UpdateClassInclude / CreateTestInclude each run it
+			// under the lock — a stateless lookup there retires the session the
+			// handle belongs to (issue #91). This is the full gate, so nothing
+			// is skipped, only moved out of the window.
+			gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
+				Op:        OpUpdate,
+				OpName:    "WriteSource",
+				ObjectURL: objectURL,
+				Transport: opts.Transport,
+			})
+			if gateErr != nil {
+				result.Message += fmt.Sprintf(" (Warning: test include not written: %v)", gateErr)
+				return result, nil
+			}
+			ctx = gatedCtx
+
 			// Lock for test update
 			lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 			if err != nil {
@@ -814,14 +874,28 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 				return result, nil
 			}
 
+			// Reuse the request the object is already bound to when the caller supplied no
+			// transport, so an already-captured object is not rejected with a spurious 409
+			// (issue #144). Re-checks transportable-edit policy on the resolved request.
+			testTransport, resolveErr := c.resolveWriteTransport(opts.Transport, lock.CorrNr, "WriteSource(testclasses)")
+			if resolveErr != nil {
+				// The compensating unlock is the only place a leak can be
+				// observed, so its failure is reported rather than dropped.
+				if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+					result.Message += fmt.Sprintf(" (%s)", strandedLockAdvice(objectURL, unlockErr))
+				}
+				result.Message += fmt.Sprintf(" (Warning: Transportable-edit check failed for test include: %v)", resolveErr)
+				return result, nil
+			}
+
 			// Update test include - try update first, create if it doesn't exist
-			err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, opts.Transport)
+			err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, testTransport)
 			if err != nil {
 				// Try to create the test include first (it may not exist)
-				createErr := c.CreateTestInclude(ctx, name, lock.LockHandle, opts.Transport)
+				createErr := c.CreateTestInclude(ctx, name, lock.LockHandle, testTransport)
 				if createErr == nil {
 					// Retry update after creating
-					err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, opts.Transport)
+					err = c.UpdateClassInclude(ctx, name, "testclasses", opts.TestSource, lock.LockHandle, testTransport)
 				}
 			}
 			unlockErr := c.UnlockObject(ctx, objectURL, lock.LockHandle)
@@ -855,6 +929,20 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		sourceURL := objectURL + "/source/main"
 		result.ObjectURL = objectURL
 
+		// Full gate, run here rather than inside UpdateSource under the lock
+		// (issue #91). Nothing is skipped — the package lookup is only moved
+		// out of the lock window.
+		gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
+			Op:        OpUpdate,
+			OpName:    "WriteSource",
+			ObjectURL: objectURL,
+			Transport: opts.Transport,
+		})
+		if gateErr != nil {
+			return nil, gateErr
+		}
+		ctx = gatedCtx
+
 		// Syntax check
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
 		if err != nil {
@@ -885,8 +973,17 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			}
 		}()
 
+		// Reuse the request the object is already bound to when the caller supplied no
+		// transport, so an already-captured object is not rejected with a spurious 409
+		// (issue #144). Re-checks transportable-edit policy on the resolved request.
+		transport, err := c.resolveWriteTransport(opts.Transport, lock.CorrNr, "WriteSource(INTF)")
+		if err != nil {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+			return result, nil
+		}
+
 		// Update
-		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to update source: %v", err)
 			return result, nil
@@ -939,6 +1036,20 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.ObjectURL = objectURL
 		sourceURL := objectURL + "/source/main"
 
+		// Full gate, run here rather than inside UpdateSource under the lock
+		// (issue #91). Nothing is skipped — the package lookup is only moved
+		// out of the lock window.
+		gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
+			Op:        OpUpdate,
+			OpName:    "WriteSource",
+			ObjectURL: objectURL,
+			Transport: opts.Transport,
+		})
+		if gateErr != nil {
+			return nil, gateErr
+		}
+		ctx = gatedCtx
+
 		// Syntax check
 		syntaxErrors, err := c.SyntaxCheck(ctx, objectURL, source)
 		if err != nil {
@@ -969,8 +1080,17 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			}
 		}()
 
+		// Reuse the request the object is already bound to when the caller supplied no
+		// transport, so an already-captured object is not rejected with a spurious 409
+		// (issue #144). Re-checks transportable-edit policy on the resolved request.
+		transport, err := c.resolveWriteTransport(opts.Transport, lock.CorrNr, fmt.Sprintf("WriteSource(%s)", objectType))
+		if err != nil {
+			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+			return result, nil
+		}
+
 		// Update
-		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, opts.Transport)
+		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to update source: %v", err)
 			return result, nil
@@ -1022,6 +1142,19 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	methodName = strings.ToUpper(methodName)
 	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(strings.ToLower(className)))
 	result.ObjectURL = objectURL
+
+	// Full gate up front, so UpdateSource does not repeat the networked
+	// package lookup between the LOCK and the PUT (issue #91).
+	gatedCtx, gateErr := c.gateAndMark(ctx, MutationContext{
+		Op:        OpUpdate,
+		OpName:    "WriteSource",
+		ObjectURL: objectURL,
+		Transport: transport,
+	})
+	if gateErr != nil {
+		return nil, gateErr
+	}
+	ctx = gatedCtx
 
 	// Get method boundaries
 	methods, err := c.GetClassMethods(ctx, className)
@@ -1099,6 +1232,15 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 			c.UnlockObject(ctx, objectURL, lock.LockHandle)
 		}
 	}()
+
+	// Reuse the request the object is already bound to when the caller supplied no
+	// transport, so an already-captured object is not rejected with a spurious 409
+	// (issue #144). Re-checks transportable-edit policy on the resolved request.
+	transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "WriteSource(method)")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
 
 	// Update
 	sourceURL := objectURL + "/source/main"

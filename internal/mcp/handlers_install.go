@@ -331,11 +331,19 @@ func (s *Server) handleInstallZADTVSP(ctx context.Context, request mcp.CallToolR
 	// Phase 1: Check prerequisites
 	sb.WriteString("Checking prerequisites...\n")
 
-	// Check if package exists (verify URI is populated - empty URI means package doesn't really exist)
-	packageExists := false
-	pkg, err := s.adtClient.GetPackage(ctx, packageName)
-	if err == nil && pkg.URI != "" {
-		packageExists = true
+	// Check if package exists. This used to read GetPackage and test
+	// pkg.URI != "", but nothing populates PackageContent.URI — the
+	// nodestructure parser sets Name/Objects/SubPackages only — so the test
+	// was false for every package and the install always took the create
+	// path. PackageExists probes /packages/{name} directly: 200 → exists,
+	// 404 → not. A probe that fails for any other reason falls through to
+	// the create path, where SAP's own error surfaces.
+	packageExists, pkgErr := s.adtClient.PackageExists(ctx, packageName)
+	if pkgErr != nil {
+		fmt.Fprintf(&sb, "  ⚠ Package %s existence check failed: %v — will attempt create\n", packageName, pkgErr)
+		packageExists = false
+	}
+	if packageExists {
 		fmt.Fprintf(&sb, "  ✓ Package %s exists\n", packageName)
 	} else {
 		fmt.Fprintf(&sb, "  → Package %s will be created\n", packageName)
@@ -427,17 +435,23 @@ func (s *Server) handleInstallZADTVSP(ctx context.Context, request mcp.CallToolR
 
 		// Use WriteSource to create/update
 		opts := &adt.WriteSourceOptions{
-			Package: packageName,
-			Mode:    adt.WriteModeUpsert,
+			Package:     packageName,
+			Description: obj.Description,
+			Mode:        adt.WriteModeUpsert,
 		}
-		_, err := s.adtClient.WriteSource(ctx, obj.Type, obj.Name, obj.Source, opts)
+		res, err := s.adtClient.WriteSource(ctx, obj.Type, obj.Name, obj.Source, opts)
 		if err != nil {
 			fmt.Fprintf(&sb, "✗ Failed: %v\n", err)
 			failed = append(failed, obj.Name+": "+err.Error())
-		} else {
-			sb.WriteString("✓ Deployed\n")
-			deployed = append(deployed, obj.Name)
+			continue
 		}
+		if ok, msg := res.Deployed(); !ok {
+			fmt.Fprintf(&sb, "✗ Failed: %s\n", msg)
+			failed = append(failed, obj.Name+": "+msg)
+			continue
+		}
+		sb.WriteString("✓ Deployed\n")
+		deployed = append(deployed, obj.Name)
 	}
 
 	sb.WriteString("\n")

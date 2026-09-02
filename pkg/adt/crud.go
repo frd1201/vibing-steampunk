@@ -27,8 +27,25 @@ type LockResult struct {
 // LockObject acquires an edit lock on an ABAP object.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/programs/programs/ZTEST")
 // accessMode is typically "MODIFY" for editing
-// transport is the transport task number (corrNr / Aufgabe) — required for objects in transportable packages
-func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, transport string) (*LockResult, error) {
+//
+// corrNr is the transport task number (Aufgabe). ADT expects it on the LOCK
+// request for objects in transportable packages, not only on the write that
+// follows, and passing it here is what makes such an object lockable at all.
+//
+// It is variadic rather than a fourth positional parameter on purpose. This
+// fork sends corrNr at LOCK time; upstream does not, so every upstream call
+// site is written three-argument. A fixed fourth parameter turns each of those
+// into a build break that arrives with the next merge — twice already, once in
+// a file that merged without a conflict at all. Variadic costs one line here
+// and makes both spellings compile.
+//
+// Only the first value is read; further ones are ignored, because there is no
+// meaning to give them.
+func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, corrNr ...string) (*LockResult, error) {
+	transport := ""
+	if len(corrNr) > 0 {
+		transport = corrNr[0]
+	}
 	// Safety check - only check for MODIFY locks, READ locks are safe
 	if accessMode == "" || accessMode == "MODIFY" {
 		if err := c.checkSafety(OpLock, "LockObject"); err != nil {
@@ -257,7 +274,8 @@ type CreateObjectOptions struct {
 	BindingType string `json:"bindingType,omitempty"`
 	// For SRVB: binding version ("V2" or "V4")
 	BindingVersion string `json:"bindingVersion,omitempty"`
-	// For SRVB: category ("0" for Web API, "1" for UI)
+	// For SRVB: category per SAP domain SRVB_BND_CATEGORY:
+	// "0" = UI (User Interface), "1" = A2X (Application to X users, i.e. Web API)
 	BindingCategory string `json:"bindingCategory,omitempty"`
 
 	// For BDEF: source code (required for creation - ADT API embeds source in creation request)
@@ -577,9 +595,25 @@ func (c *Client) RecoverFailedCreate(ctx context.Context, opts CreateObjectOptio
 
 // packageExists checks if a package exists in the system.
 // Returns true if package exists or if the check is inconclusive (API errors).
-// Only returns false when GetPackage succeeds but returns an empty/invalid result.
-// Uses GetPackage (nodestructure API) which passes the package name as a query
-// parameter, avoiding URL path encoding issues with $ in local package names.
+// It asks GetPackage (the nodestructure API), which passes the package name as
+// a query parameter and so avoids URL path encoding issues with $ in local
+// package names.
+//
+// KNOWN GAP — do not "tidy" this without deciding it first. Nodestructure
+// answers a missing package with a 200 and an empty tree, exactly as it answers
+// an existing but empty one, and GetPackage never returns a nil
+// *PackageContent on success. So this returns true for every name, and the
+// CreateObject guard built on it cannot fire: the orphan ENQUEUE it exists to
+// prevent is created anyway.
+//
+// Client.PackageExists is the probe that can tell the two apart, and the
+// install paths in cmd/vsp/devops.go use it. It was not swapped in here
+// because this guard blocks every create on every release: on a system where
+// /sap/bc/adt/packages is absent (handleInstallZADTVSP already warns about
+// 7.40) that probe's 404 is indistinguishable from a missing package, and the
+// false negative would stop object creation outright rather than merely fail
+// to prevent a lock. Closing it properly needs a way to tell "no such package"
+// from "no such resource".
 func (c *Client) packageExists(ctx context.Context, packageName string) bool {
 	pkg, err := c.GetPackage(ctx, packageName)
 	if err != nil {
@@ -811,7 +845,7 @@ func buildCreateObjectBody(opts CreateObjectOptions, typeInfo objectTypeInfo, de
 		}
 		bindingCategory := opts.BindingCategory
 		if bindingCategory == "" {
-			bindingCategory = "0" // Web API
+			bindingCategory = "0" // UI (SRVB_BND_CATEGORY: 0=UI, 1=A2X/Web API)
 		}
 		return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <%s %s xmlns:adtcore="http://www.sap.com/adt/core"
@@ -1223,7 +1257,8 @@ type CreateTableOptions struct {
 // CreateTable creates a new DDIC transparent table from JSON-like options.
 // This is a high-level tool that handles the full workflow: create → set source → activate.
 func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error {
-	// Validate input
+	// Validate input first: the package default below is part of what the gate
+	// has to see.
 	opts.Name = strings.ToUpper(opts.Name)
 	if opts.Name == "" || len(opts.Name) > 30 {
 		return fmt.Errorf("table name must be 1-30 characters")
@@ -1291,36 +1326,33 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	tableURL := fmt.Sprintf("/sap/bc/adt/ddic/tables/%s", strings.ToLower(opts.Name))
 	sourceURL := tableURL + "/source/main"
 
+	// The table was just created in opts.Package, which the gate above
+	// accepted, so UpdateSource does not have to resolve it again from inside
+	// the lock (issue #91).
+	ctx = withMutationPackageChecked(ctx, tableURL)
+
 	lock, err := c.LockObject(ctx, tableURL, "MODIFY", opts.Transport)
 	if err != nil {
 		return fmt.Errorf("locking table: %w", err)
 	}
 
-	params = url.Values{}
-	params.Set("lockHandle", lock.LockHandle)
-	if opts.Transport != "" {
-		params.Set("corrNr", opts.Transport)
-	}
-
-	_, err = c.transport.Request(ctx, sourceURL, &RequestOptions{
-		Method:      http.MethodPut,
-		Query:       params,
-		Body:        []byte(ddlSource),
-		ContentType: "text/plain",
-		// Must match the lock session (issue #88). This path bypasses
-		// UpdateSource, which has carried the flag since the lock-handle work,
-		// and so was sending a *stateless* PUT between the stateful LOCK above
-		// and the UNLOCK below — SAP retires the ICM context the lock lives in
-		// and the write comes back 423 InvalidLockHandle.
-		Stateful: true,
-	})
-	if err != nil {
-		c.UnlockObject(ctx, tableURL, lock.LockHandle)
-		return fmt.Errorf("updating table source: %w", err)
+	// This used to be a hand-rolled transport.Request with no Stateful field,
+	// which meant the PUT that consumes the lock handle went out explicitly
+	// stateless — it retired the very session the handle was issued in, and
+	// creating a table failed with 423 InvalidLockHandle on every attempt, on
+	// any configuration. UpdateSource is the same request with Stateful: true
+	// and the mutation gate attached.
+	if updateErr := c.UpdateSource(ctx, sourceURL, ddlSource, lock.LockHandle, opts.Transport); updateErr != nil {
+		if unlockErr := c.releaseLockAfterFailure(ctx, tableURL, lock.LockHandle); unlockErr != nil {
+			return fmt.Errorf("updating table source: %w — %s", updateErr, strandedLockAdvice(tableURL, unlockErr))
+		}
+		return fmt.Errorf("updating table source: %w", updateErr)
 	}
 
 	// Unlock BEFORE activation
-	c.UnlockObject(ctx, tableURL, lock.LockHandle)
+	if unlockErr := c.UnlockObject(ctx, tableURL, lock.LockHandle); unlockErr != nil {
+		return fmt.Errorf("unlocking table before activation: %w — %s", unlockErr, strandedLockAdvice(tableURL, unlockErr))
+	}
 
 	// Step 3: Activate
 	activation, err := c.Activate(ctx, tableURL, opts.Name)

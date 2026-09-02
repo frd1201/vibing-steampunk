@@ -29,13 +29,16 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/programs/%s", url.PathEscape(programName))
 	sourceURL := objectURL + "/source/main"
 
-	// Unified mutation policy gate (op type + package + transport)
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving the
+	// same package again from inside the lock window (issue #91).
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteProgram",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -68,13 +71,25 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 		return result, nil
 	}
 
-	// Ensure we unlock on any error
+	// Ensure we unlock on any error. Detached from the caller's cancellation,
+	// and reported rather than dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
+
+	// Reuse the request the object is already bound to when the caller supplied no
+	// transport, so an already-captured object is not rejected with a spurious 409
+	// (issue #144). Re-checks transportable-edit policy on the resolved request.
+	transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "WriteProgram")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
 
 	// Step 3: Update source
 	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
@@ -84,12 +99,15 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	}
 
 	// Step 4: Unlock before activation (SAP requirement)
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, programName)
@@ -127,12 +145,17 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	objectURL := fmt.Sprintf("/sap/bc/adt/programs/includes/%s", url.PathEscape(includeName))
 	sourceURL := objectURL + "/source/main"
 
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving the
+	// same package again from inside the lock window (issue #91) — the include
+	// path needs it exactly as much as WriteProgram and WriteClass do.
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteInclude",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -163,20 +186,41 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			// Detached from the caller's cancellation, and reported rather
+			// than dropped: when the write failed *because* the context was
+			// cancelled or hit its deadline, an unlock on that same context
+			// dies inside http.NewRequestWithContext without sending a byte
+			// and the ENQUEUE stays on the include. The caller's only evidence
+			// of that is this message.
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
+
+	// Reuse the request the object is already bound to when the caller supplied no
+	// transport, so an already-captured object is not rejected with a spurious 409
+	// (issue #144). Re-checks transportable-edit policy on the resolved request.
+	transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "WriteInclude")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
 
 	if err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport); err != nil {
 		result.Message = fmt.Sprintf("Failed to update source: %v", err)
 		return result, nil
 	}
 
-	if err = c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	activation, err := c.Activate(ctx, objectURL, includeName)
 	if err != nil {
@@ -212,13 +256,16 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	objectURL := fmt.Sprintf("/sap/bc/adt/oo/classes/%s", url.PathEscape(className))
 	sourceURL := objectURL + "/source/main"
 
-	// Unified mutation policy gate (op type + package + transport)
-	if err := c.checkMutation(ctx, MutationContext{
+	// Unified mutation policy gate (op type + package + transport). The
+	// returned context carries the mark that stops UpdateSource resolving the
+	// same package again from inside the lock window (issue #91).
+	ctx, err := c.gateAndMark(ctx, MutationContext{
 		Op:        OpWorkflow,
 		OpName:    "WriteClass",
 		ObjectURL: objectURL,
 		Transport: transport,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -251,12 +298,25 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 		return result, nil
 	}
 
+	// Detached from the caller's cancellation, and reported rather than
+	// dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
+
+	// Reuse the request the object is already bound to when the caller supplied no
+	// transport, so an already-captured object is not rejected with a spurious 409
+	// (issue #144). Re-checks transportable-edit policy on the resolved request.
+	transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "WriteClass")
+	if err != nil {
+		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
+		return result, nil
+	}
 
 	// Step 3: Update source
 	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
@@ -266,12 +326,15 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	}
 
 	// Step 4: Unlock
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, className)
@@ -339,6 +402,12 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		return result, nil
 	}
 
+	// The gate above accepted packageName, and CreateObject gated it a second
+	// time before asking SAP to put the program there — so the program's
+	// package is a package the whitelist allows. Record that for the object,
+	// or UpdateSource resolves it again from inside the lock (issue #91).
+	ctx = withMutationPackageChecked(ctx, objectURL)
+
 	// Step 2: Lock
 	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
@@ -346,10 +415,14 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		return result, nil
 	}
 
+	// Detached from the caller's cancellation, and reported rather than
+	// dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -361,12 +434,15 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 	}
 
 	// Step 4: Unlock
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 5: Activate
 	activation, err := c.Activate(ctx, objectURL, programName)
@@ -434,6 +510,13 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		return result, nil
 	}
 
+	// Same reasoning as CreateAndActivateProgram: packageName passed the gate
+	// twice and the class was created there, so the three mutators that run
+	// under the single lock below (UpdateSource, CreateTestInclude,
+	// UpdateClassInclude — all of which resolve to this class URL) need not
+	// each resolve the package again mid-window (issue #91).
+	ctx = withMutationPackageChecked(ctx, objectURL)
+
 	// Step 2: Lock
 	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
@@ -441,10 +524,14 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		return result, nil
 	}
 
+	// Detached from the caller's cancellation, and reported rather than
+	// dropped: see the same defer in WriteInclude.
 	unlocked := false
 	defer func() {
 		if !unlocked && !result.Success {
-			c.UnlockObject(ctx, objectURL, lock.LockHandle)
+			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
+				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
+			}
 		}
 	}()
 
@@ -470,12 +557,15 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 	}
 
 	// Step 6: Unlock
-	err = c.UnlockObject(ctx, objectURL, lock.LockHandle)
-	if err != nil {
-		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
+	// Detached, and marked released before the attempt, for the reasons
+	// writeFunctionModule's happy path is: an unlock issued on a context that
+	// has just expired never leaves the process, and the defer must not send a
+	// second UNLOCK for a handle this one already consumed.
+	unlocked = true
+	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
+		result.Message = strandedLockAdvice(objectURL, err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Step 7: Activate
 	activation, err := c.Activate(ctx, objectURL, className)
