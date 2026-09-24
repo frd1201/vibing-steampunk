@@ -202,10 +202,9 @@ to avoid ever needing this.
 Keep these branches alive until the PR is closed.
 
 **As of 2026-09-24:** nothing from the previous round is open (all four closed by
-2026-09-02). Three new branches are pushed and wait for their upstream PR to be
-opened by hand — this environment cannot open PRs on `oisee/*`. Titles and
-bodies are in `.local/upstream-prs.md`; the compare links are
-`https://github.com/oisee/vibing-steampunk/compare/main...frd1201:vibing-steampunk:<branch>`.
+2026-09-02); three new PRs were opened the same day. Before opening, the three
+branch commits were rewritten with the same tree and parent: the originals
+carried AI co-author trailers and an AI author, which this repo's PRs must not.
 
 | PR | Branch | Subject | Status |
 |---|---|---|---|
@@ -213,9 +212,9 @@ bodies are in `.local/upstream-prs.md`; the compare links are
 | ~~[#121](https://github.com/oisee/vibing-steampunk/pull/121)~~ | `feat/incl-write-support` | INCL (PROG/I) write support | **merged** upstream (`d8ee78c`), after 131 days open |
 | ~~[#126](https://github.com/oisee/vibing-steampunk/pull/126)~~ | `fix/search-type-filter-issue-119` | server-side search type filter | **merged** upstream (`598e37c`), after 123 days open |
 | ~~[#164](https://github.com/oisee/vibing-steampunk/pull/164)~~ | `fix/query-top-0-returns-100-rows` | `--top 0` / `all_rows` returns every row | **merged** upstream (`df4a186`) |
-| *to open* | `feat/corrnr-at-lock` (`2f92ce0`) | corrNr on the LOCK request, variadic, incl. upstream's newer lock paths | back-fill of `4b80378` + `b615466` + `05f4bd1`, written fresh on `upstream/main` |
-| *to open* | `fix/redirect-credentials-off-host` (`aa64350`) | `CheckRedirect` keeps credentials and CSRF token on the SAP host | back-fill of the `CheckRedirect` part of `b83b4fa` |
-| *to open* | `fix/retry-request-session-reconcile` (`7e9bce8`) | `retryRequest` reads the session back | Workflow A — merged into the fork via the 2026-09-24 sync branch (`2331f97`) |
+| [#256](https://github.com/oisee/vibing-steampunk/pull/256) | `feat/corrnr-at-lock` (`9d720d7`) | corrNr on the LOCK request, variadic, incl. upstream's newer lock paths | back-fill of `4b80378` + `b615466` + `05f4bd1`, written fresh on `upstream/main` |
+| [#257](https://github.com/oisee/vibing-steampunk/pull/257) | `fix/redirect-credentials-off-host` (`6066173`) | `CheckRedirect` keeps credentials and CSRF token on the SAP host | back-fill of the `CheckRedirect` part of `b83b4fa` |
+| [#258](https://github.com/oisee/vibing-steampunk/pull/258) | `fix/retry-request-session-reconcile` (`88df7a3`) | `retryRequest` reads the session back | Workflow A — the fork has it as `7e9bce8` (merged via `2331f97`); the PR carries the rewritten `88df7a3`, same tree |
 
 The four branches of the closed round are released: nothing upstream holds them
 (`b0f3110`, `59b401b`, `38e8b43`, `2e972de`). Deleting them failed from the
@@ -435,8 +434,9 @@ Relevant when syncing after upstream merges #120 or #121.
 |---|---|---|
 | `a47b225` | `2ea6004` | `feat/incl-write-support` |
 | `886a9b2` | `59b401b` | `fix/csrf-head-fallback-and-session-type` |
-| `4b80378`, `b615466`, `05f4bd1` | `2f92ce0` | `feat/corrnr-at-lock` |
-| `b83b4fa` (the `CheckRedirect` part) | `aa64350` | `fix/redirect-credentials-off-host` |
+| `4b80378`, `b615466`, `05f4bd1` | `9d720d7` | `feat/corrnr-at-lock` |
+| `b83b4fa` (the `CheckRedirect` part) | `6066173` | `fix/redirect-credentials-off-host` |
+| `7e9bce8` | `88df7a3` | `fix/retry-request-session-reconcile` |
 
 When upstream merges `feat/corrnr-at-lock`, the next sync brings its tests back
 as duplicates of ours: `lockQueryRecorder`, `lockHandleXML`,
