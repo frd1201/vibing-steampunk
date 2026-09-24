@@ -425,8 +425,9 @@ the running version, verifies the download against the release's
 `checksums.txt`, and puts it in place of the running binary — the old one is
 renamed aside first, which is what Windows allows for a running executable.
 The release comes from the repository the binary was built for: these
-releases are `github.com/oisee/vibing-steampunk`, and a fork's own builds
-update from that fork. `--repo owner/name` points at a different repository
+releases are `github.com/oisee/vibing-steampunk`, and a fork's own releases
+update from that fork; a local `make build` carries no stamp and uses the
+default. `--repo owner/name` points at a different repository
 for one run.
 
 ```bash

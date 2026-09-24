@@ -41,7 +41,10 @@ func resolveReleaseRepo(flag, stamped string) (string, error) {
 	if flag != "" {
 		repo = flag
 	}
-	if !releaseRepoRe.MatchString(repo) {
+	// "." and ".." fit the character class but are path segments, not
+	// repository names: "owner/.." would turn /repos/owner/../releases/latest
+	// into a request against a different API endpoint.
+	if !releaseRepoRe.MatchString(repo) || strings.HasSuffix(repo, "/.") || strings.HasSuffix(repo, "/..") {
 		return "", fmt.Errorf("repository %q is not owner/name", repo)
 	}
 	return repo, nil
@@ -92,7 +95,7 @@ swap it in place of the running executable.
   vsp update                  # install the latest release if it is newer
   vsp update --check          # only report what would happen
   vsp update --version v2.57.0
-  vsp update --repo frd1201/vibing-steampunk
+  vsp update --repo owner/name
   vsp update --force          # install even if not newer, or from a dev build
 
 --repo overrides the repository to update from, for checking a fork other
@@ -370,12 +373,13 @@ func checksumFor(text, asset string) (string, bool) {
 }
 
 func fetchRelease(ctx context.Context, repo, tag string) (*release, error) {
-	url := updateAPIRoot + "/repos/" + repo + "/releases/latest"
+	base := updateAPIRoot + "/repos/" + repo + "/releases"
+	url := base + "/latest"
 	if tag != "" {
 		if _, ok := parseVersion(tag); ok && !strings.HasPrefix(tag, "v") {
 			tag = "v" + tag
 		}
-		url = updateAPIRoot + "/repos/" + repo + "/releases/tags/" + tag
+		url = base + "/tags/" + tag
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -391,8 +395,13 @@ func fetchRelease(ctx context.Context, repo, tag string) (*release, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound && tag != "" {
-		return nil, fmt.Errorf("release %s not found", tag)
+	if resp.StatusCode == http.StatusNotFound {
+		// GitHub answers 404 both for a repository that does not exist (or is
+		// private without a token) and for one with no published release.
+		if tag != "" {
+			return nil, fmt.Errorf("release %s not found in %s", tag, repo)
+		}
+		return nil, fmt.Errorf("no published release found in %s", repo)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

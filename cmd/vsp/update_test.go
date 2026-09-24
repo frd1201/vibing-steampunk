@@ -447,11 +447,9 @@ func TestResolveReleaseRepoValidation(t *testing.T) {
 		}
 	}
 
-	// A repo passed through the flag or stamped slot is validated as given;
-	// an empty slot instead falls through to the next one in the precedence
-	// chain, so the empty string from the bad list below is checked directly
-	// against the regex rather than through resolveReleaseRepo.
-	bad := []string{"noslash", "a/b/c", "../x", "a/b?x", "a b/c"}
+	// An empty slot falls through to the next one in the precedence chain,
+	// so the empty string is checked against the regex directly below.
+	bad := []string{"noslash", "a/b/c", "../x", "a/b?x", "a b/c", "x/..", "x/."}
 	for _, repo := range bad {
 		_, err := resolveReleaseRepo(repo, "")
 		if err == nil {
@@ -542,14 +540,26 @@ func TestUpdateInvalidRepoFlagFailsBeforeHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected HTTP request to %s", r.URL)
 	}))
-	srv.Close() // closed: a request that reached it would fail with a
-	// connection error, not the validation error this test expects
+	defer srv.Close()
 	setUpdateBase(t, srv.URL)
 	target := writeTarget(t)
 
 	var out bytes.Buffer
 	_, err := runUpdate(context.Background(), updateOptions{Current: "v2.56.0", Target: target, Repo: "not a valid repo"}, &out)
 	want := `repository "not a valid repo" is not owner/name`
+	if err == nil || err.Error() != want {
+		t.Errorf("err = %v, want %q", err, want)
+	}
+}
+
+func TestUpdateRepoWithoutReleaseNamesTheRepo(t *testing.T) {
+	srv := fakeRelease(t, defaultReleaseRepo, "v2.57.0", []byte("x"), goodChecksums)
+	setUpdateBase(t, srv.URL)
+	target := writeTarget(t)
+
+	var out bytes.Buffer
+	_, err := runUpdate(context.Background(), updateOptions{Current: "v2.56.0", Target: target, Check: true, Repo: "owner/no-releases"}, &out)
+	want := "no published release found in owner/no-releases"
 	if err == nil || err.Error() != want {
 		t.Errorf("err = %v, want %q", err, want)
 	}
