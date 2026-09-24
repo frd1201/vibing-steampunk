@@ -20,7 +20,10 @@ SSO_HELPER_DIR=./cmd/vsp-sso
 SSO_HELPER=$(BUILD_DIR)/vsp-sso.exe
 
 # Version info
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Fork: only v3.* tags name a build. Upstream's v2.* tags are in our history
+# after every sync, and without --match `git describe` reports those instead
+# (see FORK.md, Release).
+VERSION ?= $(shell git describe --tags --match 'v3.*' --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 

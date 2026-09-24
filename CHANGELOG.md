@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.58.0] - unreleased
+Fork release on upstream **v2.58.0** (upstream head `9886d27`). First release on
+the `v3.<upstream-minor>.<fork-patch>` line — see FORK.md, *Release*. Covers
+everything since v3.0.1: the upstream syncs of August (v2.54.0) and September
+(v2.54.0 + #145, #149, #106, #128, #173, #174, #167), and this one (v2.55.0 – v2.58.0).
+
+### Own changes
+
+- **adt:** corrNr on the LOCK request for objects in transportable packages, with a variadic `LockObject` so upstream's three-argument calls still compile (`4b80378`, `b615466`); carried into upstream's newer lock paths — SetDescription, WriteTextPool, the IAM catalog lock and the self-locking MCP tools (`05f4bd1`)
+- **adt:** `CheckRedirect` no longer sends Basic credentials, the CSRF token or the session type to a host other than the SAP system (`d94f43a`, `b83b4fa`)
+- **adt:** cookie jar strips the `Secure` flag over plain HTTP, and every session-recovery path keeps that jar (`d94f43a`, and held against upstream's `resetCookieJar` in every sync)
+- **adt:** `SAP_SESSION_TYPE` reaches the CLI as well as the MCP server, with one parser; `keep` goes stateful once a session exists (`d94f43a`, `b83b4fa`)
+- **adt:** lock-window fixes — RenameObject writes to `/source/main`, CreateTable writes its DDL statefully and honours the package whitelist, the package safety search stays stateful, no double UNLOCK (`d94f43a`, `b83b4fa`, `c6c70d4`)
+- **adt,mcp,cli:** compensating unlocks run detached from the caller's cancellation and report a stranded lock instead of dropping it (`c6c70d4`, `15804c1`)
+- **mcp:** `LockObject` tool takes a `transport` argument (`d94f43a`)
+- **ci:** build and test gate on pull requests and `main`; `.golangci.yml` migrated to the v2 schema (`05ccde3`, `a022e5a`)
+- **release:** fork release line `v3.<U>.<P>`; `make` versions builds from `v3.*` tags only; the release workflow derives the version and publishes the hand-written CHANGELOG section
+
+### Adopted from upstream
+
+- **v2.55.0 – v2.58.0**, this sync: #178 keep-alive lock window, #179 CGO-free SQLite, #180 warnings do not block, #182 write-safety result verification, #183 single-call lock (#169), #186–#189 debug UI, #193–#197 data clusters, spool and jobs, #198 inspect, #199 response cache, #200–#202 text pools and descriptions, #203 transport choice, #206 transport merge/move, #207 redirect headers and ICMENOSESSION reset (trace-to-file taken; our `CheckRedirect` and jar kept), #208 transport organizer filters, #209 session-holding proxy guard, #210 pre-auth client proxy wiring, #211 dump RCA detail, #213 ENHO read, #214 ActivateMultiple, #215 IAM chain, #218 source-hash guard
+- **v2.39.0 – v2.54.0**, earlier syncs: see FORK.md, *Upstream PR decisions* and *Upstream syncs*
+
 ## [3.0.0] - 2026-06-22
 ### Bug Fixes
 
