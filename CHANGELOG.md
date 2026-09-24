@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.58.0] - unreleased
+Fork release on upstream **v2.58.0** (upstream head `9886d27`). First release on
+the `v3.<upstream-minor>.<fork-patch>` line — see FORK.md, *Release*. Covers
+everything since v3.0.1: the upstream syncs of August (v2.54.0) and September
+(v2.54.0 + #145, #149, #106, #128, #173, #174, #167), and this one (v2.55.0 – v2.58.0).
+
+### Own changes
+
+- **adt:** corrNr on the LOCK request for objects in transportable packages, with a variadic `LockObject` so upstream's three-argument calls still compile (`4b80378`, `b615466`); carried into upstream's newer lock paths — SetDescription, WriteTextPool, the IAM catalog lock and the self-locking MCP tools (`05f4bd1`)
+- **adt:** `CheckRedirect` no longer sends Basic credentials, the CSRF token or the session type to a host other than the SAP system (`d94f43a`, `b83b4fa`)
+- **adt:** cookie jar strips the `Secure` flag over plain HTTP, and every session-recovery path keeps that jar (`d94f43a`, and held against upstream's `resetCookieJar` in every sync)
+- **adt:** `SAP_SESSION_TYPE` reaches the CLI as well as the MCP server, with one parser; `keep` goes stateful once a session exists (`d94f43a`, `b83b4fa`)
+- **adt:** lock-window fixes — RenameObject writes to `/source/main`, CreateTable writes its DDL statefully and honours the package whitelist, the package safety search stays stateful, no double UNLOCK (`d94f43a`, `b83b4fa`, `c6c70d4`)
+- **adt,mcp,cli:** compensating unlocks run detached from the caller's cancellation and report a stranded lock instead of dropping it (`c6c70d4`, `15804c1`)
+- **mcp:** `LockObject` tool takes a `transport` argument (`d94f43a`)
+- **ci:** build and test gate on pull requests and `main`; `.golangci.yml` migrated to the v2 schema (`05ccde3`, `a022e5a`)
+- **release:** fork release line `v3.<U>.<P>`; `make` versions builds from `v3.*` tags only; the release workflow derives the version and publishes the hand-written CHANGELOG section
+
+### Adopted from upstream
+
+- **v2.55.0 – v2.58.0**, this sync: #178 keep-alive lock window, #179 CGO-free SQLite, #180 warnings do not block, #182 write-safety result verification, #183 single-call lock (#169), #186–#189 debug UI, #193–#197 data clusters, spool and jobs, #198 inspect, #199 response cache, #200–#202 text pools and descriptions, #203 transport choice, #206 transport merge/move, #207 redirect headers and ICMENOSESSION reset (trace-to-file taken; our `CheckRedirect` and jar kept), #208 transport organizer filters, #209 session-holding proxy guard, #210 pre-auth client proxy wiring, #211 dump RCA detail, #213 ENHO read, #214 ActivateMultiple, #215 IAM chain, #218 source-hash guard
+- **v2.39.0 – v2.54.0**, earlier syncs: see FORK.md, *Upstream PR decisions* and *Upstream syncs*
+
 ## [3.0.0] - 2026-06-22
 ### Bug Fixes
 
@@ -24,6 +47,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > refuse the HEAD and answer the GET perfectly well, so short-circuiting on 403
 > reintroduces the unusability the fallback exists to prevent. Upstream's
 > `fetchCSRFTokenWithReauth` is used instead.
+
+## [2.56.0] - 2026-09-05
+### Bug Fixes
+
+- **fmtest:** Take a leading FM or FUNC, the way the other commands take a type ([`ac302a2`](https://github.com/oisee/vibing-steampunk/commit/ac302a24869568396150aed6f978118096c0b7ba))
+
+
+### Features
+
+- **cluster:** --layout names the fields from DD03L, and STXL reads as text ([`18ee30a`](https://github.com/oisee/vibing-steampunk/commit/18ee30a923f4bd7c99ccf401e2947d1856ebe39c))
+- **cluster:** Deep data — tables in rows, string objects, DD40L line types ([`fb181bf`](https://github.com/oisee/vibing-steampunk/commit/fb181bf67eca323246c81ee88fb8fa3d2a976427))
+- **cluster:** Version 5 clusters, and a decompress command for bare streams ([`04f3a29`](https://github.com/oisee/vibing-steampunk/commit/04f3a292ad1cba19a2ed6c5405dd8abec9f824f9))
+- **spool,jobs:** SM37 and SP01 as tables, the TemSe list format decoded ([`79c0f56`](https://github.com/oisee/vibing-steampunk/commit/79c0f56e271ba545d2d7a11aa73a7a27f86e765d))
+- **inspect:** Variants, SE37 test data, SE61 documentation and the IMG ([`d6eba35`](https://github.com/oisee/vibing-steampunk/commit/d6eba3588c32b2ec1321d5af1cd3954852271a48))
+
+
+
+## [2.55.0] - 2026-09-04
+### Bug Fixes
+
+- **query:** --top 0 and MCP all_rows now return every row instead of capping at 100 ([`8a61d02`](https://github.com/oisee/vibing-steampunk/commit/8a61d022e8b7e41b411c4365a5aa9fd14ba08228))
+- **mcp:** The dead return that has kept CI red since 25 August ([`51c8c67`](https://github.com/oisee/vibing-steampunk/commit/51c8c67928fa3936ced3caffecd0038d0566bd50))
+- **mcp:** Route read for SRVB — advertised but dropped by the switch ([`2432a33`](https://github.com/oisee/vibing-steampunk/commit/2432a33d0c2c9aa85a7f59bbc191c90efb683b70))
+- **srvb:** Correct inverted binding_category docs (0=UI, 1=A2X) ([`44dd292`](https://github.com/oisee/vibing-steampunk/commit/44dd292b5b06f8e6467c4dd274094e2634053300))
+- **adt:** CSRF HEAD→GET fallback + SAP_SESSION_TYPE env var ([`9303a05`](https://github.com/oisee/vibing-steampunk/commit/9303a05bcc3bdddc8d94f535185dbb70e77cabad))
+- Fixed/added client to browser auth ([`68688b9`](https://github.com/oisee/vibing-steampunk/commit/68688b9dd4358d2b892819b08145838e40eb7dc7))
+- **install:** Propagate Description + surface !Success in zadt-vsp deploy ([`4bab1ca`](https://github.com/oisee/vibing-steampunk/commit/4bab1ca56c2c880644d439a44295b69e8bc313df))
+- **install:** Detect pre-existing package via direct probe ([`ca5f17b`](https://github.com/oisee/vibing-steampunk/commit/ca5f17b04dfc46b5504534b1abd80ff8ac19b168))
+- **adt:** A lock handle dies of the request nobody flagged ([`2aff8cf`](https://github.com/oisee/vibing-steampunk/commit/2aff8cff258c812867610c10ef05bafe7fad6945))
+- **search:** Pass --type to ADT server-side so --max applies after type filter ([`cdb3dea`](https://github.com/oisee/vibing-steampunk/commit/cdb3dea0bae1c7a73a29663b929d5812984a516a))
+- **search:** Add TODO for INCL canonical type pending upstream PR #121 ([`47e8de0`](https://github.com/oisee/vibing-steampunk/commit/47e8de0d7e8658a666ae47f93c91cef74f3148bd))
+- **search:** Wire MCP path + move CanonicalObjectType to adt (PR #126 review) ([`ec65287`](https://github.com/oisee/vibing-steampunk/commit/ec652871fd176393dabf931843f446ceb7df4fe0))
+- **adt:** Extract INCL name from filename; move SyntaxCheck before Lock ([`48fcf5a`](https://github.com/oisee/vibing-steampunk/commit/48fcf5a92f6f0135c669e32908e3b2be2a3d8d67))
+- **adt:** The transport parsers each knew one shape, and neither was the tree ([`6c8c5c7`](https://github.com/oisee/vibing-steampunk/commit/6c8c5c7e6132b25787b0b28d07d4a5ce075126d7))
+- **adt:** An activation that failed could still report success ([`584ce45`](https://github.com/oisee/vibing-steampunk/commit/584ce45567a8a0f5b41b1639d17b007131299005))
+- **adt:** Report the compensating unlock instead of dropping it ([`f65087d`](https://github.com/oisee/vibing-steampunk/commit/f65087d24ddce0687c4a00b4f0bcd43a0419f743))
+- **cache:** The shipped SQLite cache was a stub, and the local one was broken ([`4931e8d`](https://github.com/oisee/vibing-steampunk/commit/4931e8dab1a56d588b0a3084db90dfb20851308a))
+- **adt:** The keep-alive kept the session by ending it ([`e62e359`](https://github.com/oisee/vibing-steampunk/commit/e62e359a951f35706dd3ada32f3a4335d7a0eaa4))
+- **adt:** A syntax warning is reported, not enforced ([`b2a9cd6`](https://github.com/oisee/vibing-steampunk/commit/b2a9cd6458ce21d56a2faa9de64c40bb0a211979))
+- **adt:** Fail closed on logical mutation results ([`4610a03`](https://github.com/oisee/vibing-steampunk/commit/4610a0318457eefd18f9e1202a8964158a633122))
+- **lua:** Surface writeSource failures and options ([`4aeeb26`](https://github.com/oisee/vibing-steampunk/commit/4aeeb2693fbc148901a2db0075eb88bfef303e2b))
+- **install:** Verify packages and deployed sources ([`0c87aee`](https://github.com/oisee/vibing-steampunk/commit/0c87aee942fc8eea2fe064a28f0b47a45f6ca239))
+- **copy:** Reject incomplete deployments ([`6b63809`](https://github.com/oisee/vibing-steampunk/commit/6b63809fd2ccf147e9bcb89d712ea55f136fdfba))
+- **mcp:** Fail closed without discarding the diagnosis ([`f0544e2`](https://github.com/oisee/vibing-steampunk/commit/f0544e2016207e3c0adb75173c298e6e9c5bf15e))
+- **mcp:** A lock handle stops being something a model has to carry ([`f217820`](https://github.com/oisee/vibing-steampunk/commit/f217820250aeab15f7c74a7970364e5a22852b9e))
+- **saprfc:** A breakpoint went to the wrong object when the name was shared ([`0ad10d1`](https://github.com/oisee/vibing-steampunk/commit/0ad10d1013af442b4674abd33714d5d5f3493c31))
+- **cli:** -s <system> reached five commands only as an empty config ([`1226501`](https://github.com/oisee/vibing-steampunk/commit/122650182b4e8046235834f8f252b6c133f00ae7))
+- **debug:** The source pane pushed the controls off the page ([`5b2096e`](https://github.com/oisee/vibing-steampunk/commit/5b2096ec0c658a0f193421a7e27921b4b069d768))
+- **jseval:** The tokeniser cut identifiers in the middle of a rune ([`70dd191`](https://github.com/oisee/vibing-steampunk/commit/70dd191ca8f70f7d3bdc77da29a36ef3c940d9d7))
+
+
+### Features
+
+- **adt:** Add INCL (PROG/I) write support for WriteSource, EditSource, CLI ([`02e2182`](https://github.com/oisee/vibing-steampunk/commit/02e2182d40c34a86a245de30c537a11ce1da1b82))
+- **debug:** A local UI, so the debugger can be looked at ([`e45c2f0`](https://github.com/oisee/vibing-steampunk/commit/e45c2f0309841c03dafe58fc837c85ee023675dd))
+- **debug:** The UI opens on an object and stops in it ([`640fea0`](https://github.com/oisee/vibing-steampunk/commit/640fea054d2d9f7a9e3f6617e895194fc8fe2681))
+- **debug:** Run sets the breakpoint, calls the target and catches it ([`9f26be8`](https://github.com/oisee/vibing-steampunk/commit/9f26be8a4e602a6235aed94481acf37a55ad2a5c))
+- **cluster:** Decode EXPORT data clusters — BALDAT, INDX, STXL — over plain ADT ([`64d1734`](https://github.com/oisee/vibing-steampunk/commit/64d1734909ade811a48e747b3a85558094e0394b))
+
+
+
 ## [2.54.0] - 2026-08-27
 ### Performance
 
@@ -347,6 +431,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two high defects from f6b1726 review + statement-order literal scope ([`afbc19d`](https://github.com/oisee/vibing-steampunk/commit/afbc19dc0f3e74ed89dd0eb71c344a1b3a0a8adc))
 - **saml:** Address PR #97 review follow-up notes ([`87ce9c7`](https://github.com/oisee/vibing-steampunk/commit/87ce9c76929619e695371717e96a913f6e274ce4))
 - **adt:** Close the lock-handle bug class — Stateful + ModificationSupport guard ([`22517d4`](https://github.com/oisee/vibing-steampunk/commit/22517d46241852f473e619eeeb6a5fd827305a70))
+- **adt:** Reuse an object's existing open transport on write (#144) ([`130c4d0`](https://github.com/oisee/vibing-steampunk/commit/130c4d0e05e9291adced1e4276957cb09f60f07d))
+- **adt:** Extend open-transport reuse to the remaining update paths (#144) ([`53c9db3`](https://github.com/oisee/vibing-steampunk/commit/53c9db3e5d3e2dec8c3a4f430f94c844629ae7db))
 
 
 ### Features

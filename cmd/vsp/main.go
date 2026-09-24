@@ -37,7 +37,7 @@ Two modes of operation:
 
   MCP Server (default)  Connects Claude, Gemini CLI, Copilot, Codex, Qwen Code,
                         and other MCP-compatible agents to SAP systems.
-                        102 tools (focused), 147 (expert), or 1 universal tool (hyperfocused).
+                        100 tools (focused), 151 (expert), or 1 universal tool (hyperfocused).
 
   CLI Mode              Direct terminal access: search, source, export, debug.
                         Multi-system profiles. Useful for scripts and pipelines.
@@ -80,6 +80,13 @@ Ready-to-use configs for 8 AI agents: docs/cli-agents/`,
 			adt.SetLogOutput(os.Stderr)
 		}
 		return nil
+	},
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		if cfg.Verbose && lastClient != nil {
+			if s := lastClient.CacheStats(); s.Enabled {
+				fmt.Fprintf(os.Stderr, "[cache] %d hits, %d misses, %d entries, %d invalidations, ttl %s\n", s.Hits, s.Misses, s.Entries, s.Invalidations, s.TTL)
+			}
+		}
 	},
 	RunE: runServer,
 }
@@ -125,7 +132,7 @@ func init() {
 	rootCmd.Flags().String("credential-cmd", "", "External command returning JSON {\"username\":...,\"password\":...} (space-separated argv, no shell quoting — use a wrapper script for paths with spaces)")
 
 	// Session keep-alive
-	rootCmd.Flags().Duration("keepalive", 5*time.Minute, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled")
+	rootCmd.Flags().Duration("keepalive", 0, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled (default; see #168)")
 
 	// Safety options
 	rootCmd.Flags().BoolVar(&cfg.ReadOnly, "read-only", false, "Block all write operations (create, update, delete, activate)")
@@ -137,9 +144,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&cfg.TransportReadOnly, "transport-read-only", false, "Only allow read operations on transports (list, get)")
 	rootCmd.Flags().StringSliceVar(&cfg.AllowedTransports, "allowed-transports", nil, "Restrict transport operations to specific transports (comma-separated, supports wildcards like A4HK*)")
 	rootCmd.Flags().BoolVar(&cfg.AllowTransportableEdits, "allow-transportable-edits", false, "Allow editing objects in transportable packages (requires transport parameter)")
+	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
-	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (102 tools), or expert (147 tools)")
+	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (100 tools), or expert (151 tools)")
 	rootCmd.Flags().StringVar(&cfg.DisabledGroups, "disabled-groups", "", "Disable tool groups: 5/U=UI5, T=Tests, H=HANA, D=Debug, GC=gCTS, N=i18n")
 
 	// Transport options
@@ -444,6 +452,11 @@ func resolveConfig(cmd *cobra.Command) {
 	}
 	if !cmd.Flags().Changed("allow-transportable-edits") {
 		cfg.AllowTransportableEdits = viper.GetBool("ALLOW_TRANSPORTABLE_EDITS")
+	}
+	if !cmd.Flags().Changed("transport-choice") {
+		if v := viper.GetString("TRANSPORT_CHOICE"); v != "" {
+			cfg.TransportChoice = v
+		}
 	}
 
 	// Feature configuration: flag > SAP_FEATURE_* env

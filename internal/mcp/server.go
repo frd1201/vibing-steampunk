@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"net"
 	"net/http"
 	"net/url"
@@ -98,6 +99,7 @@ type Config struct {
 	TransportReadOnly       bool     // Only allow read operations on transports (list, get)
 	AllowedTransports       []string // Whitelist specific transports (supports wildcards like "A4HK*")
 	AllowTransportableEdits bool     // Allow editing objects that require transport requests
+	TransportChoice         string   // auto (default): pick a request for a write that names none; off: leave it to SAP
 
 	// Feature configuration (safety network)
 	// Values: "auto" (default, probe system), "on" (force enabled), "off" (force disabled)
@@ -201,7 +203,31 @@ func NewServer(cfg *Config) *Server {
 	if cfg.AllowTransportableEdits {
 		safety.AllowTransportableEdits = true
 	}
+	if cfg.TransportChoice != "" {
+		safety.TransportChoice = cfg.TransportChoice
+	}
 	opts = append(opts, adt.WithSafety(safety))
+
+	// VSP_CACHE=true keeps GET answers for VSP_CACHE_TTL (10m by default),
+	// in memory for the life of the server; VSP_CACHE_PATH puts them on
+	// SQLite instead. Any write through the client empties it.
+	if strings.EqualFold(os.Getenv("VSP_CACHE"), "true") {
+		ttl := adt.DefaultCacheTTL
+		if raw := strings.TrimSpace(os.Getenv("VSP_CACHE_TTL")); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				ttl = d
+			}
+		}
+		if path := strings.TrimSpace(os.Getenv("VSP_CACHE_PATH")); path != "" {
+			if store, err := cache.NewResponseStore(path); err == nil {
+				opts = append(opts, adt.WithCacheStore(store, ttl))
+			} else {
+				opts = append(opts, adt.WithCache(ttl))
+			}
+		} else {
+			opts = append(opts, adt.WithCache(ttl))
+		}
+	}
 
 	adtClient := adt.NewClient(cfg.BaseURL, cfg.Username, cfg.Password, opts...)
 	return NewServerWithClient(cfg, adtClient)

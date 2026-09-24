@@ -134,8 +134,13 @@ func (c *Client) GetSource(ctx context.Context, objectType, name string, opts *G
 		}
 		return string(data), nil
 
+	case "ENHO":
+		// Enhancement Framework implementation — read via the ADT enhancement
+		// endpoints (see enhancements.go).
+		return c.GetEnhancement(ctx, name)
+
 	default:
-		return "", fmt.Errorf("unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, VIEW, BDEF, SRVD, SRVB, MSAG)", objectType)
+		return "", fmt.Errorf("unsupported object type: %s (supported: PROG, CLAS, INTF, FUNC, FUGR, INCL, DDLS, VIEW, BDEF, SRVD, SRVB, MSAG, ENHO)", objectType)
 	}
 }
 
@@ -157,41 +162,47 @@ type WriteSourceOptions struct {
 	Transport   string          // Transport request number
 	Method      string          // For CLAS only: update only this method (source must be METHOD...ENDMETHOD block)
 	Parent      string          // For FUNC only: function group. Empty resolves it from the module name.
+	// ExpectedSourceHash is the SourceHash returned by GetSource. When supplied
+	// for an update, VSP re-reads the source after taking the write lock and
+	// refuses to overwrite a version changed since that read.
+	ExpectedSourceHash string
 }
 
 // WriteSourceResult represents the result of WriteSource operation
 type WriteSourceResult struct {
-	Success      bool                `json:"success"`
-	ObjectType   string              `json:"objectType"`
-	ObjectName   string              `json:"objectName"`
-	ObjectURL    string              `json:"objectUrl"`
-	Mode         string              `json:"mode"`             // "created" or "updated"
-	Method       string              `json:"method,omitempty"` // Method name if method-level update
-	SyntaxErrors []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
-	Activation   *ActivationResult   `json:"activation,omitempty"`
-	TestResults  *UnitTestResult     `json:"testResults,omitempty"` // For CLAS with TestSource
-	Message      string              `json:"message,omitempty"`
+	// Transport is the request the write went under, and TransportNote
+	// says how it was chosen when the caller named none.
+	Transport          string              `json:"transport,omitempty"`
+	TransportNote      string              `json:"transportNote,omitempty"`
+	Success            bool                `json:"success"`
+	ObjectType         string              `json:"objectType"`
+	ObjectName         string              `json:"objectName"`
+	ObjectURL          string              `json:"objectUrl"`
+	Mode               string              `json:"mode"`             // "created" or "updated"
+	Method             string              `json:"method,omitempty"` // Method name if method-level update
+	SyntaxErrors       []SyntaxCheckResult `json:"syntaxErrors,omitempty"`
+	Activation         *ActivationResult   `json:"activation,omitempty"`
+	TestResults        *UnitTestResult     `json:"testResults,omitempty"` // For CLAS with TestSource
+	ExpectedSourceHash string              `json:"expectedSourceHash,omitempty"`
+	TargetSourceHash   string              `json:"targetSourceHash,omitempty"`
+	VerifiedSourceHash string              `json:"verifiedSourceHash,omitempty"`
+	Message            string              `json:"message,omitempty"`
 }
 
-// Deployed reports whether the write actually landed, and why not when it did
-// not.
-//
-// WriteSource returns most refusals as (result{Success:false}, nil) — a syntax
-// error, a failed activation, an unsupported type — so a caller that reads only
-// the error counts every one of those as a deployed object and prints "OK".
-// Three deploy loops (two in cmd/vsp, one in internal/mcp) each had to know
-// that; now they ask.
-func (r *WriteSourceResult) Deployed() (bool, string) {
-	switch {
-	case r == nil:
-		return false, "unknown failure"
-	case r.Success:
-		return true, r.Message
-	case r.Message != "":
-		return false, r.Message
-	default:
-		return false, "unknown failure"
+// WriteSourceResultError converts a logical WriteSource failure into an error
+// for callers that must not report success after an HTTP-level success.
+func WriteSourceResultError(result *WriteSourceResult) error {
+	if result == nil {
+		return fmt.Errorf("WriteSource failed: no result returned")
 	}
+	if result.Success {
+		return nil
+	}
+	message := strings.TrimSpace(result.Message)
+	if message == "" {
+		message = "operation returned success=false without a diagnostic"
+	}
+	return fmt.Errorf("WriteSource failed: %s", message)
 }
 
 // WriteSource is a unified tool for writing ABAP source code across different object types.
@@ -240,11 +251,19 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		ObjectType: objectType,
 		ObjectName: name,
 	}
+	if opts.Mode != WriteModeCreate && opts.Mode != WriteModeUpdate && opts.Mode != WriteModeUpsert {
+		result.Message = fmt.Sprintf("Invalid mode %q (supported: create, update, upsert)", opts.Mode)
+		return result, nil
+	}
 
 	// Function modules take their own path: they are addressed through their
 	// group, and creating one needs an interface rather than just source, which
 	// is what the create action is for.
 	if objectType == "FUNC" {
+		if opts.ExpectedSourceHash != "" {
+			result.Message = "expected_source_hash is not supported for function-module WriteSource; read and update the complete module through its dedicated workflow"
+			return result, nil
+		}
 		return c.writeSourceFunctionModule(ctx, name, source, opts)
 	}
 
@@ -335,7 +354,18 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 		result.Message = fmt.Sprintf("Object %s already exists (use mode=update or mode=upsert)", name)
 		return result, nil
 	}
-	if actualMode == WriteModeUpdate && !objectExists {
+	if opts.ExpectedSourceHash != "" {
+		if actualMode != WriteModeUpdate {
+			result.Message = "expected_source_hash is only valid when updating an existing object"
+			return result, nil
+		}
+		if opts.Method != "" {
+			result.Message = "expected_source_hash is not supported for method-level WriteSource; use a full-class read and update"
+			return result, nil
+		}
+		ctx = withExpectedSourceHash(ctx, opts.ExpectedSourceHash)
+	}
+	if actualMode == WriteModeUpdate && opts.Mode == WriteModeUpsert && !objectExists {
 		result.Message = fmt.Sprintf("Object %s does not exist (use mode=create or mode=upsert)", name)
 		return result, nil
 	}
@@ -344,8 +374,45 @@ func (c *Client) WriteSource(ctx context.Context, objectType, name, source strin
 	if actualMode == WriteModeCreate {
 		return c.writeSourceCreate(ctx, objectType, name, source, opts)
 	} else {
-		return c.writeSourceUpdate(ctx, objectType, name, source, opts)
+		updated, err := c.writeSourceUpdate(ctx, objectType, name, source, opts)
+		if err != nil || opts.ExpectedSourceHash == "" || !updated.Success {
+			return updated, err
+		}
+		return c.verifyWriteSourceResult(ctx, updated, source, opts)
 	}
+}
+
+// verifyWriteSourceResult performs the post-activation half of an explicit
+// versioned update. A successful PUT is not enough: SAP can materialise source
+// differently or activation can leave a different active version behind.
+func (c *Client) verifyWriteSourceResult(
+	ctx context.Context,
+	result *WriteSourceResult,
+	targetSource string,
+	opts *WriteSourceOptions,
+) (*WriteSourceResult, error) {
+	result.ExpectedSourceHash = opts.ExpectedSourceHash
+	result.TargetSourceHash = SourceHash(targetSource)
+	if result.ObjectURL == "" {
+		result.Success = false
+		result.Message = "Source was written and activated, but post-write verification has no object URL. Do not retry blindly."
+		return result, nil
+	}
+	resp, err := c.transport.Request(ctx, result.ObjectURL+"/source/main", &RequestOptions{
+		Method: "GET", Accept: "text/plain",
+	})
+	if err != nil {
+		result.Success = false
+		result.Message = fmt.Sprintf("Source was written and activated, but post-write verification could not read it: %v. Do not retry blindly.", err)
+		return result, nil
+	}
+	result.VerifiedSourceHash = SourceHash(string(resp.Body))
+	if result.VerifiedSourceHash != result.TargetSourceHash {
+		result.Success = false
+		result.Message = fmt.Sprintf("Source was written and activated, but post-write verification differs (target %s, actual %s). Do not retry blindly.", result.TargetSourceHash, result.VerifiedSourceHash)
+		return result, nil
+	}
+	return result, nil
 }
 
 // writeSourceCreate handles creation workflow
@@ -579,11 +646,17 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 		if objectType == "BDEF" {
 			createOpts.Source = source // BDEF requires source embedded in creation request
 		}
+		var chosen TransportChoice
+		createOpts.Chosen = &chosen
 		err := c.CreateObject(ctx, createOpts)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to create %s: %v", objectType, err)
 			return result, nil
 		}
+		if chosen.Transport != "" {
+			opts.Transport = chosen.Transport
+		}
+		result.Transport, result.TransportNote = opts.Transport, chosen.Reason
 
 		// Created in opts.Package, which CreateObject checked against the
 		// whitelist. Both branches below (BDEF shell fill, DDLS/SRVD source
@@ -868,6 +941,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			ctx = gatedCtx
 
 			// Lock for test update
+			trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 			lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 			if err != nil {
 				result.Message += fmt.Sprintf(" (Warning: Failed to lock for test update: %v)", err)
@@ -877,7 +951,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			// Reuse the request the object is already bound to when the caller supplied no
 			// transport, so an already-captured object is not rejected with a spurious 409
 			// (issue #144). Re-checks transportable-edit policy on the resolved request.
-			testTransport, resolveErr := c.resolveWriteTransport(opts.Transport, lock.CorrNr, "WriteSource(testclasses)")
+			testTransport, _, resolveErr := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, "WriteSource(testclasses)")
 			if resolveErr != nil {
 				// The compensating unlock is the only place a leak can be
 				// observed, so its failure is reported rather than dropped.
@@ -960,6 +1034,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.SyntaxErrors = syntaxErrors
 
 		// Lock
+		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
@@ -976,11 +1051,12 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		// Reuse the request the object is already bound to when the caller supplied no
 		// transport, so an already-captured object is not rejected with a spurious 409
 		// (issue #144). Re-checks transportable-edit policy on the resolved request.
-		transport, err := c.resolveWriteTransport(opts.Transport, lock.CorrNr, "WriteSource(INTF)")
+		transport, trNote, err := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, "WriteSource(INTF)")
 		if err != nil {
 			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
 			return result, nil
 		}
+		result.Transport, result.TransportNote = transport, trNote
 
 		// Update
 		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
@@ -1067,6 +1143,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		result.SyntaxErrors = syntaxErrors
 
 		// Lock
+		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
 		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
@@ -1083,11 +1160,12 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 		// Reuse the request the object is already bound to when the caller supplied no
 		// transport, so an already-captured object is not rejected with a spurious 409
 		// (issue #144). Re-checks transportable-edit policy on the resolved request.
-		transport, err := c.resolveWriteTransport(opts.Transport, lock.CorrNr, fmt.Sprintf("WriteSource(%s)", objectType))
+		transport, trNote, err := c.resolveWriteTransportFor(trPlan, opts.Transport, lock.CorrNr, fmt.Sprintf("WriteSource(%s)", objectType))
 		if err != nil {
 			result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
 			return result, nil
 		}
+		result.Transport, result.TransportNote = transport, trNote
 
 		// Update
 		err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
@@ -1220,6 +1298,7 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	result.SyntaxErrors = syntaxErrors
 
 	// Lock
+	trPlan := c.planTransport(ctx, transport, objectURL, "")
 	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock class: %v", err)
@@ -1236,11 +1315,13 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 	// Reuse the request the object is already bound to when the caller supplied no
 	// transport, so an already-captured object is not rejected with a spurious 409
 	// (issue #144). Re-checks transportable-edit policy on the resolved request.
-	transport, err = c.resolveWriteTransport(transport, lock.CorrNr, "WriteSource(method)")
+	var trNote string
+	transport, trNote, err = c.resolveWriteTransportFor(trPlan, transport, lock.CorrNr, "WriteSource(method)")
 	if err != nil {
 		result.Message = fmt.Sprintf("Transportable-edit check failed: %v", err)
 		return result, nil
 	}
+	result.Transport, result.TransportNote = transport, trNote
 
 	// Update
 	sourceURL := objectURL + "/source/main"

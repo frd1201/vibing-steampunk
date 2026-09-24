@@ -106,6 +106,7 @@ func (s *Server) registerTools(mode string, disabledGroups string, toolsConfig m
 	s.registerVersionHistoryTools(shouldRegister)
 	s.registerTestingQualityTools(shouldRegister)
 	s.registerI18NTools(shouldRegister)
+	s.registerIAMTools(shouldRegister)
 
 	// Register tool aliases for common operations
 	s.registerToolAliases(shouldRegister)
@@ -834,6 +835,18 @@ func (s *Server) registerDevTools(shouldRegister func(string) bool) {
 		), s.handleActivate)
 	}
 
+	if shouldRegister("ActivateMultiple") {
+		s.mcpServer.AddTool(mcp.NewTool("ActivateMultiple",
+			mcp.WithDescription("Activate multiple ABAP objects in a single ADT request, resolving mutual dependencies between them (same behaviour as Eclipse ADT). Use when includes and their main program must be activated together."),
+			mcp.WithArray("objects",
+				mcp.Required(),
+				mcp.Description(`Objects to activate. Each item can be:
+  - {"url": "/sap/bc/adt/programs/programs/zprog", "name": "ZPROG"}
+  - "TYPE NAME" shorthand, e.g. "PROG ZPROG", "INCL ZPROG_TOP", "CLAS ZCL_X"`),
+			),
+		), s.handleActivateMultiple)
+	}
+
 	if shouldRegister("ActivatePackage") {
 		s.mcpServer.AddTool(mcp.NewTool("ActivatePackage",
 			mcp.WithDescription("Activate all inactive objects. Objects are sorted by dependency order (interfaces before classes). If no package specified, activates ALL inactive objects for current user."),
@@ -989,8 +1002,7 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 				mcp.Description("ABAP source code to write"),
 			),
 			mcp.WithString("lock_handle",
-				mcp.Required(),
-				mcp.Description("Lock handle from LockObject"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock (#169)."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for local packages)"),
@@ -1167,8 +1179,7 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 				mcp.Description("ADT URL of the object (e.g., /sap/bc/adt/programs/programs/ZTEST)"),
 			),
 			mcp.WithString("lock_handle",
-				mcp.Required(),
-				mcp.Description("Lock handle from LockObject"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock (#169)."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for local packages)"),
@@ -1209,12 +1220,12 @@ func (s *Server) registerCRUDTools(shouldRegister func(string) bool) {
 
 	// Transport-related tools
 	if shouldRegister("GetUserTransports") {
-		s.mcpServer.AddTool(mcp.NewTool("GetUserTransports",
-			mcp.WithDescription("Get all transport requests for a user (requires --enable-transports flag). Returns both workbench and customizing requests grouped by target system."),
+		s.mcpServer.AddTool(mcp.NewTool("GetUserTransports", append([]mcp.ToolOption{
+			mcp.WithDescription("Get the transport requests of a user from the transport organizer (requires --enable-transports): workbench and customizing, modifiable and released, with tasks and objects, grouped by target and CTS project. Reads GET /sap/bc/adt/cts/transportrequests with explicit requestType/requestStatus (the organizer returns only released requests without them), falls back to the saved search configuration and then to E070/E07T."),
 			mcp.WithString("user_name",
-				mcp.Required(),
-				mcp.Description("SAP user name (will be converted to uppercase), or '*' for every user"),
+				mcp.Description("SAP user name (uppercased); default: the connection user. '*' for every user (source sql only)"),
 			),
+		}, transportListingParams...)...,
 		), s.handleGetUserTransports)
 	}
 
@@ -1257,8 +1268,7 @@ func (s *Server) registerClassIncludeTools(shouldRegister func(string) bool) {
 				mcp.Description("Name of the ABAP class"),
 			),
 			mcp.WithString("lock_handle",
-				mcp.Required(),
-				mcp.Description("Lock handle from LockObject (lock the parent class first)"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock on the parent class (#169)."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for local packages)"),
@@ -1282,8 +1292,7 @@ func (s *Server) registerClassIncludeTools(shouldRegister func(string) bool) {
 				mcp.Description("ABAP source code to write"),
 			),
 			mcp.WithString("lock_handle",
-				mcp.Required(),
-				mcp.Description("Lock handle from LockObject (lock the parent class first)"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock on the parent class (#169)."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for local packages)"),
@@ -1425,6 +1434,9 @@ func (s *Server) registerFileTools(shouldRegister func(string) bool) {
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for local packages)"),
 			),
+			mcp.WithString("expected_source_hash",
+				mcp.Description("Optional sourceHash returned by GetSource(include_hash=true). Refuse an existing-object deployment if SAP source has changed."),
+			),
 		), s.handleDeployFromFile)
 	}
 
@@ -1510,6 +1522,9 @@ func (s *Server) registerEditTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (required for objects not in $TMP package)"),
+			),
+			mcp.WithString("expected_source_hash",
+				mcp.Description("Optional sourceHash returned by GetSource(include_hash=true). After locking, refuse the edit if SAP source has changed."),
 			),
 		), s.handleEditSource)
 	}
@@ -1867,11 +1882,12 @@ func (s *Server) registerAMDPTools(shouldRegister func(string) bool) {
 // registerTransportTools registers CTS/Transport management tools.
 func (s *Server) registerTransportTools(shouldRegister func(string) bool) {
 	if shouldRegister("ListTransports") {
-		s.mcpServer.AddTool(mcp.NewTool("ListTransports",
-			mcp.WithDescription("List transport requests. Returns modifiable transports for a user. Requires --enable-transports OR --allow-transportable-edits flag."),
+		s.mcpServer.AddTool(mcp.NewTool("ListTransports", append([]mcp.ToolOption{
+			mcp.WithDescription("List transport requests of a user as flat rows: workbench and customizing, modifiable and released by default (request_status D limits it to modifiable). Requires --enable-transports OR --allow-transportable-edits. Reads GET /sap/bc/adt/cts/transportrequests with explicit requestType/requestStatus, falls back to the saved search configuration and then to E070/E07T; the answer names the source used."),
 			mcp.WithString("user",
-				mcp.Description("Username to list transports for (default: current user, '*' for all users)"),
+				mcp.Description("Username to list transports for (default: the connection user, '*' for all users — source sql only)"),
 			),
+		}, transportListingParams...)...,
 		), s.handleListTransports)
 	}
 
@@ -2414,7 +2430,7 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("lock_handle",
 				mcp.Required(),
-				mcp.Description("Lock handle from LockObject"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock (#169)."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for $TMP objects)"),
@@ -2447,7 +2463,7 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 			),
 			mcp.WithString("lock_handle",
 				mcp.Required(),
-				mcp.Description("Lock handle from LockObject"),
+				mcp.Description("Optional lock handle. Omit it and this call takes and releases its own lock (#169)."),
 			),
 			mcp.WithString("transport",
 				mcp.Description("Transport request number (optional for $TMP objects)"),
@@ -2498,4 +2514,32 @@ func (s *Server) registerI18NTools(shouldRegister func(string) bool) {
 			),
 		), s.handleCompareObjectLanguages)
 	}
+}
+
+// transportListingParams are the parameters GetUserTransports and
+// ListTransports share. They mirror the query parameters of
+// GET /sap/bc/adt/cts/transportrequests; see pkg/adt/transport_query.go
+// for the contract.
+var transportListingParams = []mcp.ToolOption{
+	mcp.WithString("request_type",
+		mcp.Description("Letters of K (workbench), W (customizing), T (transport of copies); default KWT"),
+	),
+	mcp.WithString("request_status",
+		mcp.Description("Letters of D (modifiable), R (released); default DR. Without it the organizer would return released requests only"),
+	),
+	mcp.WithString("released_from",
+		mcp.Description("YYYYMMDD; with released_to bounds the released requests (default: last 14 days)"),
+	),
+	mcp.WithString("released_to",
+		mcp.Description("YYYYMMDD; see released_from"),
+	),
+	mcp.WithBoolean("targets",
+		mcp.Description("Group by transport target and CTS project (default true)"),
+	),
+	mcp.WithString("source",
+		mcp.Description("Where to read from: auto (default: params, then config, then sql — first source with requests wins), params (organizer tree with explicit parameters), config (organizer tree through the saved search configuration, as Eclipse does; the configuration decides the filters and the user), sql (E070/E07T)"),
+	),
+	mcp.WithString("config_uri",
+		mcp.Description("Search configuration to use with source config, e.g. /sap/bc/adt/cts/transportrequests/searchconfiguration/configurations/<id>; default: the one saved for the user, else the first one (noted in the answer)"),
+	),
 }

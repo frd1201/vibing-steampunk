@@ -1,25 +1,20 @@
 name: Release
 
+# Fork release line: v3.<U>.<P>, where U is the minor of the newest upstream
+# release this build contains and P counts fork releases on top of it
+# (see FORK.md, Release). The CHANGELOG section for the version is written
+# by hand in the PR that prepares the release; this workflow only reads it.
+
 on:
   workflow_dispatch:
     inputs:
       version:
         description: >
-          Version to release (e.g. v2.28.0 or 2.28.0).
-          Leave empty to auto-bump from the latest tag.
+          Version to release (e.g. v3.58.0). Leave empty to derive it from the
+          upstream release this build contains.
         required: false
         default: ""
-      bump:
-        description: "Bump type used when version is not specified"
-        required: false
-        default: "minor"
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
-# Needed for goreleaser to create the GitHub release and push CHANGELOG
 permissions:
   contents: write
 
@@ -28,116 +23,90 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------------ #
-      # 1. Checkout — full history required by git-cliff and goreleaser
-      # ------------------------------------------------------------------ #
+      # 1. Checkout — full history, for the tag lookups below
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # Use a PAT if you need to push to a branch protected by
-          # "require status checks" rules. For most repos GITHUB_TOKEN works.
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # ------------------------------------------------------------------ #
-      # 2. Set up Go (version comes from go.mod toolchain directive)
-      # ------------------------------------------------------------------ #
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      # ------------------------------------------------------------------ #
-      # 3. Run tests — abort the release if anything is red
-      # ------------------------------------------------------------------ #
+      # 2. Abort the release if anything is red
       - name: Run tests
         run: go test ./...
 
-      # ------------------------------------------------------------------ #
-      # 4. Determine the release version
-      #    Priority: manual input > auto-bump from latest tag
-      # ------------------------------------------------------------------ #
+      # 3. Determine the version
+      #    Upstream's tags are fetched into refs/upstream-tags, never refs/tags,
+      #    so neither git describe nor goreleaser can mistake them for ours.
       - name: Determine version
         id: version
         run: |
+          set -euo pipefail
           INPUT="${{ github.event.inputs.version }}"
 
           if [[ -n "$INPUT" ]]; then
-            # Use the manually supplied version (add "v" prefix if missing)
-            VERSION="${INPUT#v}"
-            VERSION="v${VERSION}"
+            VERSION="v${INPUT#v}"
           else
-            # Auto-bump: parse the latest semver tag
-            LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-            # Strip leading "v" and split into parts
-            VERSION_CORE="${LATEST#v}"
-            MAJOR=$(echo "$VERSION_CORE" | cut -d. -f1)
-            MINOR=$(echo "$VERSION_CORE" | cut -d. -f2)
-            PATCH=$(echo "$VERSION_CORE" | cut -d. -f3 | cut -d- -f1)
+            git fetch --no-tags https://github.com/oisee/vibing-steampunk.git \
+              '+refs/tags/v2.*:refs/upstream-tags/v2.*'
+            UPSTREAM=$(git for-each-ref --merged HEAD --sort=-version:refname --count=1 \
+              --format='%(refname:lstrip=2)' refs/upstream-tags)
+            if [[ -z "$UPSTREAM" ]]; then
+              echo "::error::no upstream release tag is contained in HEAD"
+              exit 1
+            fi
+            U=$(echo "${UPSTREAM#v}" | cut -d. -f2)
 
-            case "${{ github.event.inputs.bump }}" in
-              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-              patch) PATCH=$((PATCH + 1)) ;;
-            esac
+            LAST=$(git describe --tags --match 'v3.*' --abbrev=0 2>/dev/null || echo "v3.0.0")
+            LAST_U=$(echo "${LAST#v}" | cut -d. -f2)
+            LAST_P=$(echo "${LAST#v}" | cut -d. -f3 | cut -d- -f1)
+            if [[ "$LAST_U" == "$U" ]]; then P=$((LAST_P + 1)); else P=0; fi
 
-            VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+            VERSION="v3.${U}.${P}"
+            echo "Contains upstream ${UPSTREAM}; last fork release ${LAST}"
+          fi
+
+          if [[ ! "$VERSION" =~ ^v3\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::${VERSION} is not on the fork's v3.<U>.<P> line"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            echo "::error::${VERSION} is already tagged"
+            exit 1
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Releasing ${VERSION}"
 
-      # ------------------------------------------------------------------ #
-      # 5. Install git-cliff (pinned to a known-good release)
-      # ------------------------------------------------------------------ #
-      - name: Install git-cliff
-        uses: taiki-e/install-action@v2
-        with:
-          tool: git-cliff@2.12.0
-
-      # ------------------------------------------------------------------ #
-      # 6. Generate CHANGELOG.md and commit it
-      #    --tag assigns all commits since the previous tag to the new version,
-      #    so the output contains only released versions (no [Unreleased] block)
-      # ------------------------------------------------------------------ #
-      - name: Generate CHANGELOG.md
+      # 4. Release notes: the version's own CHANGELOG section, verbatim.
+      #    A release without one is refused rather than published empty.
+      - name: Extract release notes
         run: |
-          git-cliff --tag "${{ steps.version.outputs.version }}" --output CHANGELOG.md
+          set -euo pipefail
+          V="${{ steps.version.outputs.version }}"
+          awk -v h="## [${V#v}]" '
+            index($0, h) == 1 { on = 1; next }
+            on && /^## \[/    { exit }
+            on                { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [[ ! -s RELEASE_NOTES.md ]]; then
+            echo "::error::CHANGELOG.md has no '## [${V#v}]' section — add it in the release PR (FORK.md, Release)"
+            exit 1
+          fi
 
-      - name: Commit CHANGELOG.md
+      # 5. Tag and push the tag only — no bot commit on main
+      - name: Tag and push
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add CHANGELOG.md
-          # Only commit if CHANGELOG.md actually changed
-          if git diff --staged --quiet; then
-            echo "CHANGELOG.md unchanged — skipping commit"
-          else
-            git commit -m "chore: update CHANGELOG for ${{ steps.version.outputs.version }}"
-          fi
-
-      # ------------------------------------------------------------------ #
-      # 7. Tag and push
-      #    Push the commit first, then the tag so goreleaser finds it
-      # ------------------------------------------------------------------ #
-      - name: Tag and push
-        run: |
-          git tag "${{ steps.version.outputs.version }}"
-          git push origin HEAD:main
+          git tag -a "${{ steps.version.outputs.version }}" -m "Release ${{ steps.version.outputs.version }}"
           git push origin "${{ steps.version.outputs.version }}"
 
-      # ------------------------------------------------------------------ #
-      # 8. Generate release notes for this version only (git-cliff --latest)
-      # ------------------------------------------------------------------ #
-      - name: Generate release notes
-        run: |
-          git-cliff --tag "${{ steps.version.outputs.version }}" --latest --strip header --output RELEASE_NOTES.md
-
-      # ------------------------------------------------------------------ #
-      # 9. GoReleaser — builds all 9 platform binaries, creates GitHub release
-      #    Release notes come from git-cliff (GoReleaser changelog is skipped)
-      # ------------------------------------------------------------------ #
+      # 6. GoReleaser — builds all platform binaries, creates the GitHub release
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -146,3 +115,4 @@ jobs:
           args: release --clean --release-notes=RELEASE_NOTES.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.version }}

@@ -9,6 +9,8 @@
 > Two rules that are easy to break by accident: upstream-worthy work branches off
 > `upstream/main` (not `main`), and never cherry-pick — always merge.
 
+> **Shared knowledge base:** [`../sap-kb/`](../sap-kb/) maps vsp against its SAP-protocol siblings (open-rfc-go, open-diag-go-pro, sap-sso-trace) — the layer stack and the reuse matrix. vsp owns `pkg/sapcompress` (decode), `pkg/datacluster`, the ADT transport and the `ZADT_VSP` bridge. Chapter: [`../sap-kb/repos/vsp.md`](../sap-kb/repos/vsp.md); cross-repo backlog: [`../sap-kb/backlog.md`](../sap-kb/backlog.md).
+
 ---
 
 ## Current Priorities
@@ -35,21 +37,36 @@ pending for a week after both shipped on 2026-08-25. Corrected 2026-09-02.
   produces them. Verified still true 2026-09-02.
 - Design: [002](reports/2026-04-05-002-graph-engine-design.md), [003](reports/2026-04-05-003-graph-engine-alignment-for-claude.md)
 
-### 2. GUI Debugger (Issue #2) — Strategic
-Plan: MCP debug sessions → DAP → Web UI. ADT REST API mapped from `CL_TPDA_ADT_RES_APP`. Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
+### 2. Debugger — Phase 1 shipped, #2 closed 2026-09-02
+This line advertised "MCP debug sessions → DAP → Web UI" and pointed at #2 after
+that issue was closed, so it promised two phases nobody was tracking.
+- Built: `pkg/adt/debugger.go` (1833 lines), a session that survives across MCP
+  tool calls (`internal/mcp/handlers_debug_session.go`), six registered tools,
+  and ADT-native AMDP routing whose breakpoints actually fire.
+- Not built: the DAP shim and the Web UI. No `DebugAdapter` code, no `web/`.
+  Now tracked as #184, together with the question of whether vsp should ship a
+  UI at all or stop at DAP and let editors be the front end.
+- Design: [001](reports/2026-04-05-001-gui-debugger-design.md)
 
 ### 3. Open Issues
 - **#91** The 423 lock-handle class — the live one, and this entry was wrong
   twice. `22517d4` did not close it: a third-party release bisect names that
   commit as the start of a regression, and its `ModificationSupport` guard was
   itself removed by `9b98997`. #88, #92, #98, #110 are closed as duplicates of
-  #91 (2026-09-01); #132 stays open for its transport-reuse leg.
+  #91 (2026-09-01), and #132 with them once PR #145 landed the transport reuse
+  its second leg needed. Confirmed fixed on a live S/4HANA 758 on 2026-09-02
+  with a control: `main` creates and activates in `$TMP` where v2.54.0 fails
+  the identical operation on the same host minutes apart.
   Cause: `SessionType` defaults to stateless (`config.go:198`, `d84db03`) and
   `http.go:502` stamps every unflagged request `stateless`, so any hop between
   LOCK and the write retires the ICM context and kills the handle. The fix on
   `fix/91-session-affinity` closes the package-lookup hop, the CSRF probe, and
-  two mutations that were themselves stateless. Still open after it: the
-  keep-alive ticker (on by default, 5m) and the MCP cross-tool-call window.
+  two mutations that were themselves stateless. The keep-alive ticker is fixed
+  too (#168: default 0, and a tick inside a lock window is skipped). What is
+  left is the MCP cross-tool-call window — #169, and #181 is its deterministic
+  face: with `--allowed-packages` set every write failed this way in every
+  release since v2.42.0. PR #183 makes the lock handle optional so the window
+  cannot span a model turn.
 - **#166** A failed mutation strands the SAP-side ENQUEUE — split out of #92
   so it survives that closure. Users clear these by hand in SM12.
 - **#55** RunReport in APC — *not* an architectural limit, which this line
@@ -92,7 +109,7 @@ cmd/vsp/              CLI entry + 53 top-level commands (87 incl. subcommands)
 internal/
   mcp/
     handlers_*.go       Domain handlers (read, edit, debug, graph, ...) — 43 files
-    tools_register.go   Registration + mode logic (147 tools in expert, 102 focused)
+    tools_register.go   Registration + mode logic (151 tools in expert, 100 focused)
     tools_focused.go    Focused mode whitelist
     tools_groups.go     Disableable tool groups (--disabled-groups)
     handlers_universal.go  Hyperfocused single-tool (SAP)
@@ -101,11 +118,15 @@ pkg/
   adt/                ADT client (HTTP, CSRF, sessions, all SAP ops)
   saprfc/             Classic RFC transport (vsp rfc, RFC debugger channel)
   graph/              Dependency graph engine (in progress)
+  datacluster/        EXPORT data cluster parser (BALDAT, INDX, STXL): descriptors, rows, typed values
+  sapcompress/        SAP LZH (= DEFLATE + prefix, via compress/flate) and LZC (compress(1)) decoders
+  temse/              TemSe list spool format (TST03) → lines
+  itf/                SAPscript ITF (DOKTL documentation) → Markdown
   ctxcomp/            Context compression (dep resolution for read)
   abaplint/           ABAP lexer + parser (93 statement types over 95 registrations
                       in matcher.go register(); 13 lint rules, 8 on by default)
   dsl/                Fluent API, YAML workflows, batch ops
-  cache/              In-memory + SQLite (needs cgo)
+  cache/              In-memory + SQLite (modernc, no cgo)
   config/             Configuration loading
   scripting/          Lua engine
   jseval/             JS evaluation
@@ -180,6 +201,7 @@ the lock clears — midnight on a stock A4H, `SU01` otherwise.
 4. **Auth** — use basic OR cookies, not both. `HasBasicAuth()` disables `ReauthFunc`, so a stray `SAP_USER`/`SAP_PASSWORD` alongside SSO silently kills auto-refresh
 5. **Expired SSO sessions do not return 401** — ICF forwards to the IdP and a logon page arrives under a 200. Detection is by origin and by a missing CSRF token (`http.go`), not by status code
 6. **ZADT_VSP** — WebSocket debug/RFC/RunReport require it installed on SAP
+7. **Response cache** (`VSP_CACHE`, `pkg/adt/response_cache.go`) keeps GET answers and data preview queries on the stable tables listed in `stableTables`; it is emptied on any write through the client. A change made by someone else inside the TTL is invisible to it. The `pkg/cache` node/edge/API cache is a library nothing calls yet; its SQLite driver (modernc, CGO-free) is what the response store uses
 
 ## Security
 
@@ -269,13 +291,13 @@ successors; do not add more.
 | `pkg/graph/` | Adapters incomplete | Parser + CROSS/WBCROSSGT/D010INC/config/transport builders all exist with tests; the three `SourceADT*` constants still have no builder |
 | Dep logic duplication | Three implementations | `cli_deps.go`, `cli_extra.go` and `ctxcomp/analyzer.go` each predate `pkg/graph/`; changing one does not change the others |
 | `pkg/abaplint/lint.go` | Silent no-op | 5 of 13 rules (`select_star`, `hardcoded_credentials`, `catch_cx_root`, `commit_in_loop`, `dynamic_call_no_try`) are not in `defaultRules()` and never run |
-| `*_test.go` named `fork_corrections` | Fork-only guard rails | `pkg/adt/` and `internal/mcp/` each carry one, 26 cases between them. Genuinely fork-only after the September sync: Secure-cookie stripping (`httpCookieJar`), `SAP_SESSION_TYPE` including its CLI wiring, corrNr on the LOCK request, the rename-to-`/source/main` fix. INCL write and the CSRF GET fallback are now upstream too, and those cases stay as regression cover rather than as divergence markers. Do not delete any of them to make an upstream merge quieter — that is exactly what they exist to catch |
-| `pkg/adt/http.go` `retryRequest` | Known issue, unfixed | It renews the session but reads nothing back — no `adoptServerCookies`, no CSRF token, no session id, unlike `Request()`. Runs on exactly the paths where SAP reissues `SAP_SESSIONID`. Upstream has the same gap. Details and fix sketch in [FORK.md](FORK.md) → *Known issues* |
-| `pkg/cache/` | cgo-dependent | SQLite backend needs a C compiler; without one `cmd/vsp` and `pkg/cache` tests fail by design |
+| `*_test.go` named `fork_corrections` | Fork-only guard rails | `pkg/adt/` and `internal/mcp/` each carry one, 29 cases between them. Genuinely fork-only after the September sync: Secure-cookie stripping (`httpCookieJar`), `SAP_SESSION_TYPE` including its CLI wiring, corrNr on the LOCK request (including the lock paths upstream added in September), the rename-to-`/source/main` fix. INCL write and the CSRF GET fallback are now upstream too, and those cases stay as regression cover rather than as divergence markers. Do not delete any of them to make an upstream merge quieter — that is exactly what they exist to catch |
+| `pkg/adt/http.go` `retryRequest` | Fixed in the fork, offered upstream | It renewed the session but read nothing back. Since 2026-09-24 it shares `rememberSession` with `Request()` and adopts reissued cookies (`TestRetryRequest_AdoptsTheSessionItWasHandedBack`). Upstream still has the gap until `fix/retry-request-session-reconcile` lands; keep this side at the next sync |
 | `handlers_debugger.go` | ADT over a held session | Breakpoints and the debug loop both go through `/sap/bc/adt/debugger*` on the session in `handlers_debug_session.go`. The old "REST breakpoints 403 on newer SAP" was the stateless client, not the release |
 | `handlers_amdp.go` | Experimental | Session works, breakpoints unreliable |
 | `pkg/adt/ui5.go` | Writes, ungated by package | Not read-only, and has not been since v2.10.0 (2025-12-05): `UI5UploadFile:273`, `UI5DeleteFile:312`, `UI5CreateApp:345`, `UI5DeleteApp:387`, all MCP-reachable via `handlers_ui5.go`. They go through the ADT filestore, not `/UI5/CL_REPOSITORY_LOAD`. The real hazard is `mutation_gate.go:117` — with `--allowed-packages` set, every UI5 mutation is refused outright because app→package resolution is unimplemented |
 | `pkg/llvm2abap/`, `pkg/wasmcomp/` | Research | Not production; don't treat as stable |
 | `pkg/adt/debugger.go` (REST) | Types and parsers only | Its *client* methods still assume a stateless session; the request builders and parsers are shared and exported via `debugger_parse.go` |
 | `docs/cli-agents/*` | Config drift | Codex TOML format may differ from Claude/Gemini JSON docs |
+| `pkg/datacluster/` | Reverse-engineered format | Object header, descriptor markers and type codes were read off real clusters (fixtures in `testdata/`: a 7.58 INDX with every type, a BALDAT). A kernel that writes a marker or type code not seen there fails loudly rather than misreading; add the fixture, then the code |
 | `pkg/adt/sso*.go` | Host-dependent | Browser step must be a Windows process under WSL (PRT/WAM); needs `vsp-sso.exe` from `make sso-helper` |

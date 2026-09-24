@@ -21,6 +21,8 @@ These tools replace 11 granular read/write operations with intelligent parameter
 
 **RAP Support (NEW):** WriteSource now supports creating and updating CDS views (DDLS), behavior definitions (BDEF), and service definitions (SRVD).
 
+**Guarded updates:** Call `GetSource(include_hash=true)` to receive `{source, sourceHash}`. Supply that hash as `expected_source_hash` to `WriteSource`, `EditSource`, `ImportFromFile`, or `DeployFromFile`; VSP checks it again after acquiring the write lock and rejects `SOURCE_DRIFT` rather than overwriting another editor's work. Guarded successes include the requested target and verified read-back hashes.
+
 ---
 
 ## Search & Grep Tools (4 tools)
@@ -225,7 +227,7 @@ Solves token limit problem for large files:
 | `CreateTransport` | Create transport request | Expert |
 | `GetTransportInfo` | Get transport details | Expert |
 | `ReleaseTransport` | Release transport | Expert |
-| `GetUserTransports` | List user's transports | Expert |
+| `GetUserTransports` | List a user's transports: workbench/customizing, modifiable/released, grouped by target and CTS project. Parameters `request_type` (KWT), `request_status` (DR), `released_from`/`released_to`, `targets`, `source` (auto/params/config/sql), `config_uri` | Expert |
 | `GetInactiveObjects` | List inactive objects | Expert |
 
 ---
@@ -267,10 +269,11 @@ SAP(action="analyze", params={"type": "group_dumps"})       what keeps failing, 
 SAP(action="analyze", params={"type": "explain_dump"})      the stack, plus the application log ranked by argument
 SAP(action="analyze", params={"type": "similar_dumps"})     is this new, and how often
 SAP(action="analyze", params={"type": "dump_impact"})       who else reaches the code that failed
-SAP(action="analyze", params={"type": "application_log"})   SLG1 headers by program, user, log object
+SAP(action="analyze", params={"type": "application_log"})   SLG1 headers by program, user, log object; messages=true decodes BALDAT
+SAP(action="analyze", params={"type": "cluster_read"})      any cluster table (BALDAT, INDX, STXL) decoded: objects, typed fields, rows
 ```
 
-The same ground the CLI covers with `vsp dumps` and `vsp applog`.
+The same ground the CLI covers with `vsp dumps`, `vsp applog` and `vsp cluster`.
 
 ---
 
