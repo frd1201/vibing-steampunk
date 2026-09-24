@@ -4,7 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.58.0] - unreleased
+## [3.58.1] - 2026-09-25
+Fork release on upstream **v2.58.0** (upstream head `9886d27`), unchanged from
+3.58.0 except for the update source below.
+
+### Own changes
+
+- **update:** `vsp update` asks the repository the binary was released from.
+  GoReleaser stamps `main.ReleaseRepo` from `GITHUB_REPOSITORY`, so this fork's
+  releases update from `frd1201/vibing-steampunk` instead of upstream, where a
+  3.x binary saw v2.58.0, called itself newer, and `--force` would have
+  downgraded it. `--repo owner/name` overrides for one run; an unstamped build
+  keeps upstream's default. Output and `--json` name the repository, and a 404
+  says which repository had no release. Offered upstream.
+
+**Upgrading from 3.58.0:** install this release by hand once. 3.58.0 carries no
+stamp and still asks upstream — do not run `vsp update --force` on it.
+
+## [3.58.0] - 2026-09-24
 Fork release on upstream **v2.58.0** (upstream head `9886d27`). First release on
 the `v3.<upstream-minor>.<fork-patch>` line — see FORK.md, *Release*. Covers
 everything since v3.0.1: the upstream syncs of August (v2.54.0) and September
