@@ -217,9 +217,7 @@ carried AI co-author trailers and an AI author, which this repo's PRs must not.
 | [#258](https://github.com/oisee/vibing-steampunk/pull/258) | `fix/retry-request-session-reconcile` (`88df7a3`) | `retryRequest` reads the session back | Workflow A — the fork has it as `7e9bce8` (merged via `2331f97`); the PR carries the rewritten `88df7a3`, same tree |
 
 The four branches of the closed round are released: nothing upstream holds them
-(`b0f3110`, `59b401b`, `38e8b43`, `2e972de`). Deleting them failed from the
-2026-09-24 session — the environment's git proxy refuses branch deletion — so
-they are removed by hand in the GitHub UI. The close-if-unanswered dates (2027-04-23, 2027-05-01) are void.
+(`b0f3110`, `59b401b`, `38e8b43`, `2e972de`). Deleted 2026-09-24. The close-if-unanswered dates (2027-04-23, 2027-05-01) are void.
 
 One thing the merges cost us: upstream's copies are the revisions as submitted,
 not the revisions on `main`. The September sync therefore brought a second,
