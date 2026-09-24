@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // Characterisation tests for this fork's corrections on the MCP server side.
@@ -161,5 +163,58 @@ func TestNewServer_SessionTypeReachesTheWire(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUpdateSource_SelfLockPassesTransport pins corrNr on the LOCK that
+// UpdateSource takes for itself when no lock_handle is supplied (upstream
+// #183). withObjectLock arrived calling the three-argument LockObject, which
+// compiles against the variadic signature and drops the transport silently.
+func TestUpdateSource_SelfLockPassesTransport(t *testing.T) {
+	var mu sync.Mutex
+	var lockCorrNr []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-CSRF-Token", "tok")
+		if r.URL.Query().Get("_action") == "LOCK" {
+			mu.Lock()
+			lockCorrNr = append(lockCorrNr, r.URL.Query().Get("corrNr"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml">` +
+				`<asx:values><DATA><LOCK_HANDLE>LH-1</LOCK_HANDLE></DATA></asx:values></asx:abap>`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := newSessionTypeConfig("")
+	cfg.BaseURL = srv.URL
+	cfg.AllowTransportableEdits = true
+	s := NewServer(cfg)
+
+	var req mcp.CallToolRequest
+	req.Params.Arguments = map[string]any{
+		"object_url": "/sap/bc/adt/programs/programs/zdemo",
+		"source":     "REPORT zdemo.",
+		"transport":  "TR-EXAMPLE",
+	}
+	res, err := s.handleUpdateSource(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleUpdateSource: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("UpdateSource failed: %+v", res.Content)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lockCorrNr) == 0 {
+		t.Fatal("UpdateSource without a lock_handle took no lock")
+	}
+	for _, got := range lockCorrNr {
+		if got != "TR-EXAMPLE" {
+			t.Errorf("LOCK carried corrNr=%q, want TR-EXAMPLE", got)
+		}
 	}
 }

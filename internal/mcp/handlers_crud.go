@@ -135,7 +135,7 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		sourceURL = objectURL + "/source/main"
 	}
 
-	err := s.withObjectLock(ctx, objectURL, lockHandle, func(handle string) error {
+	err := s.withObjectLock(ctx, objectURL, lockHandle, transport, func(handle string) error {
 		return s.adtClient.UpdateSource(ctx, sourceURL, source, handle, transport)
 	})
 	if err != nil {
@@ -565,7 +565,7 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		transport = t
 	}
 
-	err := s.withObjectLockConsumed(ctx, objectURL, lockHandle, func(handle string) error {
+	err := s.withObjectLockConsumed(ctx, objectURL, lockHandle, transport, func(handle string) error {
 		return s.adtClient.DeleteObject(ctx, objectURL, handle, transport)
 	})
 	if err != nil {

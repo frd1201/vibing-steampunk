@@ -50,7 +50,7 @@ func TestLockScopeHelpersHaveTheShapeHandlersRelyOn(t *testing.T) {
 	// documents the contract rather than driving a server; the behavioural
 	// proof lives in pkg/adt's session-affinity tests. Kept as a compile-time
 	// assertion that the helper exists with the shape the handlers rely on.
-	type lockScope func(context.Context, string, string, func(string) error) error
+	type lockScope func(context.Context, string, string, string, func(string) error) error
 	var _ lockScope = (*Server)(nil).withObjectLock
 	var _ lockScope = (*Server)(nil).withObjectLockConsumed
 }
