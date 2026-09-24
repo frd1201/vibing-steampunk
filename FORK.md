@@ -201,8 +201,11 @@ to avoid ever needing this.
 
 Keep these branches alive until the PR is closed.
 
-**Nothing is open upstream as of 2026-09-02.** All three closed within four days
-of the August rebase, which is the fact this table now exists to record.
+**As of 2026-09-24:** nothing from the previous round is open (all four closed by
+2026-09-02). Three new branches are pushed and wait for their upstream PR to be
+opened by hand — this environment cannot open PRs on `oisee/*`. Titles and
+bodies are in `.local/upstream-prs.md`; the compare links are
+`https://github.com/oisee/vibing-steampunk/compare/main...frd1201:vibing-steampunk:<branch>`.
 
 | PR | Branch | Subject | Status |
 |---|---|---|---|
@@ -210,9 +213,14 @@ of the August rebase, which is the fact this table now exists to record.
 | ~~[#121](https://github.com/oisee/vibing-steampunk/pull/121)~~ | `feat/incl-write-support` | INCL (PROG/I) write support | **merged** upstream (`d8ee78c`), after 131 days open |
 | ~~[#126](https://github.com/oisee/vibing-steampunk/pull/126)~~ | `fix/search-type-filter-issue-119` | server-side search type filter | **merged** upstream (`598e37c`), after 123 days open |
 | ~~[#164](https://github.com/oisee/vibing-steampunk/pull/164)~~ | `fix/query-top-0-returns-100-rows` | `--top 0` / `all_rows` returns every row | **merged** upstream (`df4a186`) |
+| *to open* | `feat/corrnr-at-lock` (`2f92ce0`) | corrNr on the LOCK request, variadic, incl. upstream's newer lock paths | back-fill of `4b80378` + `b615466` + `05f4bd1`, written fresh on `upstream/main` |
+| *to open* | `fix/redirect-credentials-off-host` (`aa64350`) | `CheckRedirect` keeps credentials and CSRF token on the SAP host | back-fill of the `CheckRedirect` part of `b83b4fa` |
+| *to open* | `fix/retry-request-session-reconcile` (`7e9bce8`) | `retryRequest` reads the session back | Workflow A — merged into the fork via the 2026-09-24 sync branch (`2331f97`) |
 
-Both `feat/*` branches are now released: nothing upstream holds them, so they can
-be deleted. The close-if-unanswered dates (2027-04-23, 2027-05-01) are void.
+The four branches of the closed round are released: nothing upstream holds them
+(`b0f3110`, `59b401b`, `38e8b43`, `2e972de`). Deleting them failed from the
+2026-09-24 session — the environment's git proxy refuses branch deletion — so
+they are removed by hand in the GitHub UI. The close-if-unanswered dates (2027-04-23, 2027-05-01) are void.
 
 One thing the merges cost us: upstream's copies are the revisions as submitted,
 not the revisions on `main`. The September sync therefore brought a second,
@@ -354,6 +362,10 @@ here so the next person does not have to rediscover them.
 
 ### 1. `retryRequest` does not reconcile the session it just renewed
 
+**Fixed in the fork 2026-09-24** (`7e9bce8`, merged in `2331f97`) and offered
+upstream as `fix/retry-request-session-reconcile`. The analysis below stays as
+the record of why.
+
 `pkg/adt/http.go:331`. `Request()` reads three things back off every response:
 `adoptServerCookies` (`:238`), the CSRF token (`:265`) and the session id
 (`:270`). `retryRequest` reads back **none** of them.
@@ -423,6 +435,15 @@ Relevant when syncing after upstream merges #120 or #121.
 |---|---|---|
 | `a47b225` | `2ea6004` | `feat/incl-write-support` |
 | `886a9b2` | `59b401b` | `fix/csrf-head-fallback-and-session-type` |
+| `4b80378`, `b615466`, `05f4bd1` | `2f92ce0` | `feat/corrnr-at-lock` |
+| `b83b4fa` (the `CheckRedirect` part) | `aa64350` | `fix/redirect-credentials-off-host` |
+
+When upstream merges `feat/corrnr-at-lock`, the next sync brings its tests back
+as duplicates of ours: `lockQueryRecorder`, `lockHandleXML`,
+`transportableEditClient`, `assertLockCarried` and the three `*PassesTransportToLock` /
+`SelfLockPassesTransport` tests exist in both `pkg/adt/lock_corrnr_test.go`
+(theirs) and `pkg/adt/fork_corrections_test.go` / `internal/mcp/fork_corrections_test.go`
+(ours). Drop ours then; the build will say which.
 
 `6b2cece` (the parked `fork-only/onprem-edit-fixes` branch) was adopted **in
 part only**: its corrNr work became `4b80378`, its configurable
