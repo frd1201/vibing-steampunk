@@ -17,10 +17,17 @@ Rationale and decisions live in
 git clone https://github.com/frd1201/vibing-steampunk.git
 cd vibing-steampunk
 git remote add upstream https://github.com/oisee/vibing-steampunk.git
+git config remote.upstream.tagOpt --no-tags   # upstream's v2.* tags stay out
 git fetch upstream --prune
 
 go build -o vsp ./cmd/vsp
 ```
+
+Upstream's release tags must not enter this clone: after every sync they sit
+closer to `HEAD` than ours, and anything that asks `git describe` — or a stray
+`git push --tags` — takes them for this fork's. A clone that already has them
+drops every tag origin does not carry with `git fetch origin --prune --prune-tags`.
+Never `git push --tags`; push the one tag you mean.
 
 `go install github.com/frd1201/vibing-steampunk/cmd/vsp@latest` does **not**
 work by design: `go.mod` deliberately keeps the upstream module path
@@ -293,10 +300,21 @@ adopted yet.
 | [#173](https://github.com/oisee/vibing-steampunk/pull/173) | oisee | transport listing rebuilt around the tree | **adopted** 2026-09-02 (`3bbf200`) | no fork code in the area |
 | [#174](https://github.com/oisee/vibing-steampunk/pull/174) | oisee | activation parser | **adopted** 2026-09-02 (`3bbf200`) | supersedes our own fix for the same defect: theirs merges the wrapped and root shapes for messages, entries **and** properties, ours only for messages |
 | [#167](https://github.com/oisee/vibing-steampunk/pull/167) | oisee | issue #91 session affinity | **adopted** 2026-09-02 (`3bbf200`) | supersedes most of our #88 work — see the sync row below |
+| [#207](https://github.com/oisee/vibing-steampunk/pull/207) | dme007 | redirect headers, ICMENOSESSION reset | **adopted in part** 2026-09-24 | trace-to-file (`VSP_TRACE_LOG`) taken. Its `CheckRedirect` is the unhardened re-attach our off-host rule replaced, and its `resetCookieJar` in the ICMENOSESSION path builds a bare jar — both kept ours |
+| [#209](https://github.com/oisee/vibing-steampunk/pull/209) | dme007 | session-holding proxy contextid guard | **adopted** 2026-09-24 | opt-in (`SAP_PROXY_CONTEXTID_GUARD`); `hasJarCookies` works with our jar, and `retryRequest` got the guard on top of our single session-type decision |
+| [#210](https://github.com/oisee/vibing-steampunk/pull/210) | dme007 | pre-auth client proxy wiring | **adopted** 2026-09-24 | `newPreAuthHTTPClient` taken, fed with `newCookieJar` instead of `cookiejar.New` |
+| [#203](https://github.com/oisee/vibing-steampunk/pull/203) | oisee | transport choice before the lock | **adopted** 2026-09-24 | `planTransport` runs before the LOCK, which still carries the supplied transport as corrNr |
+| [#183](https://github.com/oisee/vibing-steampunk/pull/183) | oisee | single-call lock (#169) | **adopted** 2026-09-24 | `withObjectLock` took no transport; it does now (`05f4bd1`), and upstream's shape test follows until the corrNr back-fill lands |
+| [#182](https://github.com/oisee/vibing-steampunk/pull/182) | Augusto42 | write-safety result verification | **adopted** 2026-09-24 | `installer.DeploySource` supersedes our `WriteSourceResult.Deployed` (removed, `8164285`) |
+| [#208](https://github.com/oisee/vibing-steampunk/pull/208) | dme007 | transport organizer explicit filters | **adopted** 2026-09-24 | `TransportQuery.normalized` carries our empty-user default |
+| [#179](https://github.com/oisee/vibing-steampunk/pull/179) | oisee | CGO-free SQLite | **adopted** 2026-09-24 | ends the local cgo test baseline below |
 
-Watched, no collision known: #150 (ActivateMultiple), #148 (activation
-parsing), #138 (InstallZADTVSP source deploy), #130 (ENHO read), #107
-(WebSocket proxy).
+Watched, possible collision: #231 (compensating unlock at three more sites —
+overlaps `15804c1`), #229 (cookie reload on session recovery — the
+`clearSAPSessionCookies` area), #251 (concurrent callers of one client — see
+*Known issues* 2), #217 (proxy context after DELETE), #243 (DeleteObject gate
+before the lock), #138 (InstallZADTVSP source deploy). #150 and #130 are
+settled by #214 and #213.
 
 ---
 
@@ -308,6 +326,8 @@ Deliberately not upstreamed. No PR is owed for these.
 |---|---|---|
 | `d752536` | CHANGELOG for v3.0.0 | our own version line |
 | `3f7a90c` | goreleaser release target → `frd1201` | must not point upstream releases at this fork |
+| sync 2026-09-24 | `Makefile` `VERSION` uses `git describe --match 'v3.*'` | upstream's v2.* tags are in our history after every sync |
+| sync 2026-09-24 | `.github/workflows/release.yml` rewritten for the v3 line | derives `v3.<U>.<P>`, publishes the hand-written CHANGELOG section, pushes only the tag |
 
 ---
 
@@ -316,6 +336,7 @@ Deliberately not upstreamed. No PR is owed for these.
 | Sync | Upstream head | Scope | Notes |
 |---|---|---|---|
 | `sync/upstream-2026-08` | `9b8789d` (2026-08-27) | 341 commits, 314 files, +52,440 | 13 conflicts. Upstream had independently built several of our fixes, so most resolutions were a choice between two implementations rather than a combination — upstream won wherever the effect was the same. Three defects would have merged in silently: a new upstream file calling the three-arg `LockObject` (broke `go build`), a duplicate jar-reset that discarded the `httpCookieJar` wrapper, and unreachable code that `go vet` rejects. |
+| `claude/admiring-ptolemy-r48db4` | `9886d27` (2026-09-24, v2.58.0 + 3) | 110 commits, 217 files, +23,513 | 13 conflicts, 35 hunks. `resetCookieJar` came back a third time, now in the ICMENOSESSION path (#207), and #210 brought a second `cookiejar.New`. Taking "theirs" in the two install loops compiles and counts every object twice. The variadic `LockObject` held — no build break — but five new lock sites arrived without corrNr, which nothing flagged; threaded in `05f4bd1`. |
 | `sync/upstream-2026-09` | `8dd2ef8` (2026-09-02) | 50 commits, 48 files, +4,119 | 17 conflicts — more than the August sync on an eighth of the volume, because both trees had spent the week on the same defect. Upstream's issue #91 work supersedes most of our #88 work and was taken whole. Two traps: `resetCookieJar` would have deleted the `httpCookieJar` wrapper (the August trap, renamed), and a new upstream *test* file merged clean and then failed to compile against our four-argument `LockObject` — fixed at the root by `b615466`. Three of our own PRs landed upstream during the window and came back as duplicate definitions. |
 
 **What made this sync survivable** was writing the missing tests *first*. Eleven
@@ -380,6 +401,11 @@ expiry path at `:296` is not covered by `reauthMu`. Detectable under
 `go test -race`. A fix needs to decide what the concurrency contract of
 `Transport` actually is, which is why it is not a quick patch.
 
+**Rechecked 2026-09-24:** #1 is still open upstream — #209 added the proxy
+guard to `retryRequest` and nothing else — and is now offered upstream as its
+own PR (see *Our open upstream PRs*). #2 is unchanged; upstream #251 works in
+the same area and is on the watch list.
+
 **Rechecked 2026-09-02: unchanged, and deliberately so.** The September sync
 kept `clearSAPSessionCookies` over upstream's `resetCookieJar`, so the race
 comes with it. Upstream's version has the same race and additionally drops the
@@ -411,28 +437,30 @@ the strategy report.
 
 ## Release
 
-- The fork owns the **3.x** version band; upstream is on 2.x. If upstream ever
-  tags a 3.x, switch to `v3.4.0-fork.1`.
+- The fork releases as **`v3.<U>.<P>`**: `U` is the minor of the newest
+  upstream release the build contains, `P` counts fork releases on top of it
+  (0 for the release that follows a sync). Upstream v2.58.0 → **v3.58.0**; a
+  fork-only fix after it → v3.58.1; the next sync that brings v2.60.0 → v3.60.0.
+- Not a suffix on upstream's number: `v2.58.0-fork` is a SemVer pre-release,
+  sorts *before* v2.58.0, and goreleaser's `prerelease: auto` would mark every
+  release as one. If upstream ever tags a 3.x, move to `v4.<U>.<P>` and change
+  the `--match` in `Makefile` and `release.yml`.
+- **Cutting a release:** the PR that prepares it adds `## [3.<U>.<P>]` to
+  `CHANGELOG.md` with *Own changes* and *Adopted from upstream*
+  (`git log --no-merges v<last>..HEAD ^upstream/main` lists the former). After
+  it is merged, run the *Release* workflow without input: it derives the
+  version, refuses a missing CHANGELOG section or an existing tag, pushes the
+  tag and nothing else, and goreleaser publishes to `frd1201`.
 - Tags are cut from `main` only, and only when the CI job on `main` is green
   **and** an integration run against a real SAP system has passed.
 
 ### Local test baseline
 
-`go test ./...` is **not** fully green on a Windows dev box without a C
-compiler. Measured 2026-08-03 on `main` at `4deea3b`, Go 1.26.5:
+`go test ./...` is fully green without a C compiler since upstream #179 moved
+the SQLite cache to `modernc.org/sqlite` (adopted 2026-09-24). The
+`go-sqlite3 requires cgo` failures this section used to list are gone; any red
+test is a real one.
 
-| | |
-|---|---|
-| packages `ok` | 14 |
-| packages without tests | 4 |
-| packages failing | 2 — `cmd/vsp`, `pkg/cache` |
-| failing tests | 7, all `go-sqlite3 requires cgo to work` |
-
-`CGO_ENABLED` defaults to `0` when no C compiler is on `PATH`, which stubs out
-`go-sqlite3`. This is an environment limitation, not a defect. Local gate is
-therefore **"no new failures beyond these 7"**; the CI job on `ubuntu-latest`
-runs with cgo enabled and is the authoritative gate. Install MinGW/MSYS2 if you
-want the sqlite tests locally.
 - CHANGELOG keeps two sections per release: *Own changes* and *Adopted from
   upstream* (with PR number and author).
 
