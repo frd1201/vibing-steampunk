@@ -205,27 +205,6 @@ func WriteSourceResultError(result *WriteSourceResult) error {
 	return fmt.Errorf("WriteSource failed: %s", message)
 }
 
-// Deployed reports whether the write actually landed, and why not when it did
-// not.
-//
-// WriteSource returns most refusals as (result{Success:false}, nil) — a syntax
-// error, a failed activation, an unsupported type — so a caller that reads only
-// the error counts every one of those as a deployed object and prints "OK".
-// Three deploy loops (two in cmd/vsp, one in internal/mcp) each had to know
-// that; now they ask.
-func (r *WriteSourceResult) Deployed() (bool, string) {
-	switch {
-	case r == nil:
-		return false, "unknown failure"
-	case r.Success:
-		return true, r.Message
-	case r.Message != "":
-		return false, r.Message
-	default:
-		return false, "unknown failure"
-	}
-}
-
 // WriteSource is a unified tool for writing ABAP source code across different object types.
 // Replaces WriteProgram, WriteClass, CreateAndActivateProgram, CreateClassWithTests.
 //
