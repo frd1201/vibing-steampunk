@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
@@ -62,6 +64,7 @@ type systemParams struct {
 	TransportReadOnly       bool
 	AllowedTransports       []string
 	AllowTransportableEdits bool
+	TransportChoice         string
 	BlockFreeSQL            bool
 
 	Cache     bool
@@ -135,6 +138,7 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			TransportReadOnly:       sys.TransportReadOnly || envFlag("SAP_TRANSPORT_READ_ONLY"),
 			AllowedTransports:       firstNonEmptyList(sys.AllowedTransports, splitList(os.Getenv("SAP_ALLOWED_TRANSPORTS"))),
 			AllowTransportableEdits: sys.AllowTransportableEdits || envFlag("SAP_ALLOW_TRANSPORTABLE_EDITS"),
+			TransportChoice:         firstNonEmpty(sys.TransportChoice, os.Getenv("SAP_TRANSPORT_CHOICE")),
 			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
 			Cache:                   sys.Cache,
 			CachePath:               sys.CachePath,
@@ -192,6 +196,13 @@ func envFlag(name string) bool {
 }
 
 // firstNonEmptyList returns the configured list, falling back to the environment.
+func firstNonEmpty(configured, fromEnv string) string {
+	if strings.TrimSpace(configured) != "" {
+		return configured
+	}
+	return fromEnv
+}
+
 func firstNonEmptyList(configured, fromEnv []string) []string {
 	if len(configured) > 0 {
 		return configured
@@ -211,7 +222,30 @@ func splitList(v string) []string {
 }
 
 // getClient creates an ADT client from system params.
+// responseCacheTTL reads VSP_CACHE_TTL (a Go duration such as 10m); the default is
+// adt.DefaultCacheTTL.
+func responseCacheTTL() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("VSP_CACHE_TTL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+			return d
+		}
+	}
+	return adt.DefaultCacheTTL
+}
+
+// lastClient is the client the command built, so the root command can report
+// the cache's counters when asked to be verbose.
+var lastClient *adt.Client
+
 func getClient(params *systemParams) (*adt.Client, error) {
+	client, err := buildClient(params)
+	if err == nil {
+		lastClient = client
+	}
+	return client, err
+}
+
+func buildClient(params *systemParams) (*adt.Client, error) {
 	opts := []adt.Option{
 		adt.WithClient(params.Client),
 		adt.WithLanguage(params.Language),
@@ -245,6 +279,9 @@ func getClient(params *systemParams) (*adt.Client, error) {
 	if len(params.AllowedTransports) > 0 {
 		safety.AllowedTransports, restricted = params.AllowedTransports, true
 	}
+	if params.TransportChoice != "" {
+		safety.TransportChoice = params.TransportChoice
+	}
 	if params.AllowTransportableEdits {
 		safety.AllowTransportableEdits = true
 		restricted = true
@@ -254,6 +291,21 @@ func getClient(params *systemParams) (*adt.Client, error) {
 	}
 	if params.Insecure {
 		opts = append(opts, adt.WithInsecureSkipVerify())
+	}
+	// The response cache: GET answers kept for a while, dropped on any
+	// write. In memory by default; on SQLite when a path is configured, so
+	// the next CLI run starts warm.
+	if params.Cache {
+		ttl := responseCacheTTL()
+		if params.CachePath != "" {
+			store, err := cache.NewResponseStore(params.CachePath)
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, adt.WithCacheStore(store, ttl))
+		} else {
+			opts = append(opts, adt.WithCache(ttl))
+		}
 	}
 
 	// SAP_SESSION_TYPE reached the MCP server but not the CLI, so

@@ -117,9 +117,11 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		return newToolResultError("source is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
+	// Optional. Left empty, this call takes and releases its own lock, so the
+	// handle never has to survive a model turn (#169).
+	lockHandle := ""
+	if lh, ok := request.GetArguments()["lock_handle"].(string); ok {
+		lockHandle = lh
 	}
 
 	transport := ""
@@ -133,7 +135,9 @@ func (s *Server) handleUpdateSource(ctx context.Context, request mcp.CallToolReq
 		sourceURL = objectURL + "/source/main"
 	}
 
-	err := s.adtClient.UpdateSource(ctx, sourceURL, source, lockHandle, transport)
+	err := s.withObjectLock(ctx, objectURL, lockHandle, func(handle string) error {
+		return s.adtClient.UpdateSource(ctx, sourceURL, source, handle, transport)
+	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to update source: %v", err)), nil
 	}
@@ -549,9 +553,11 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		return newToolResultError("object_url is required"), nil
 	}
 
-	lockHandle, ok := request.GetArguments()["lock_handle"].(string)
-	if !ok || lockHandle == "" {
-		return newToolResultError("lock_handle is required"), nil
+	// Optional, as everywhere else: left empty this takes its own lock. DELETE
+	// consumes the handle, so there is nothing to release afterwards (#169).
+	lockHandle := ""
+	if lh, ok := request.GetArguments()["lock_handle"].(string); ok {
+		lockHandle = lh
 	}
 
 	transport := ""
@@ -559,7 +565,9 @@ func (s *Server) handleDeleteObject(ctx context.Context, request mcp.CallToolReq
 		transport = t
 	}
 
-	err := s.adtClient.DeleteObject(ctx, objectURL, lockHandle, transport)
+	err := s.withObjectLockConsumed(ctx, objectURL, lockHandle, func(handle string) error {
+		return s.adtClient.DeleteObject(ctx, objectURL, handle, transport)
+	})
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("Failed to delete object: %v", err)), nil
 	}

@@ -23,6 +23,375 @@ two worktrees, which is why it says so.
 > — the v2.55.0 sprint. Four defects that are one defect: the tool could not
 > answer, so it answered anyway. Ordered, with the test that proves each.
 
+## Open — 2026-09-14 — what `search` cannot see, and the filter that hides it
+
+Came out of a CLI design question — should every object type get a noun
+namespace like `vsp w3mi list`? The answer turned out to depend on what `search`
+can already reach, so it was measured against a live 7.5x rather than guessed.
+Three findings, and the first is a defect rather than a gap.
+
+**1. `--type X` drops sub-types — it makes `search` quietly answer wrong.**
+The filter matches the full type code, so anything with a sub-type is lost.
+Confirmed on two, and it is a shape rather than two accidents:
+
+| search | without `--type` | with `--type` |
+|---|---|---|
+| `IHTTPNVP` (a structure, `TABL/DS`) | found | `--type TABL` → **0** |
+| `WWW*` function modules (`FUGR/FF`) | 3 found | `--type FUGR` → **0** |
+
+The objects are indexed — an unfiltered search returns them with the sub-type
+right there in the output. So this is not a missing capability, it is a filter
+that silently discards matches, which is worse: `--type TABL` reports zero
+structures with the same face it would use for a package that truly has none.
+Fix is a prefix match on the type code (`TABL` matches `TABL/DT` and `TABL/DS`),
+keeping exact-code matching available for when someone means precisely `CLAS/OC`.
+**Highest value of the three** — it costs a line and it stops an answer lying.
+
+**2. W3MI is not in the repository index at all.** `search 'ZORK*'` returns
+SAPC, TRAN, SICF and PROG objects and not one MIME object, while
+`vsp w3mi list 'ZORK%'` returns five. The MIME repository is outside the
+workbench index, so no filter fix reaches it — it needs its own reader, which
+is why `vsp w3mi` exists (v2.58.0).
+
+**3. SMIM is the same and has no reader yet.** Objects exist (`SMIMPHIO` has
+rows) and `search` finds none. This is the natural next `w3mi`-shaped command:
+the BSP/MIME repository, same argument, same absence of an alternative.
+
+### The design rule this settles
+
+A type earns its own noun namespace **when its operations cannot be expressed
+in the generic verbs** — not merely because it is a distinct type.
+
+- `w3mi` passes: `search` structurally cannot list it; `get --abapgit-dir`
+  has no generic equivalent (the 255-byte/`filesize` truncation is type-specific);
+  it has no source, so `source` was never a home for it.
+- `clas`, `prog`, `intf`, `fugr` fail all three: `vsp clas list 'K*'` would be a
+  second spelling of `vsp search 'K*' --type CLAS`, and `vsp clas get X` of
+  `vsp source CLAS X`. At 66 commands, a second spelling is a cost.
+
+Two further reasons to keep the CLI verb-first with the type as data:
+
+- **It stays isomorphic with the MCP tool.** `SAP(action="read", target="CLAS ZCL_X")`
+  mirrors `vsp source CLAS ZCL_X`. Noun-first breaks that, and the docs, the
+  agent instructions and the user's mental model are shared across the two.
+- **Type-as-data scales; type-as-command-name does not.** ADT has 100+ types.
+  Verb-first, a new type costs zero commands. Noun-first, every type needs its
+  own tree, and the ones nobody writes look like "unsupported" while
+  `vsp source` reads them fine.
+
+Order to take these: the filter fix (1), then SMIM (3). (2) is done.
+
+## Open — 2026-09-11 — minimise the ZADT_VSP / server-side install (parks #138)
+
+`README` already says ZADT_VSP is "no longer needed for debugging or for calling
+function modules — the debugger runs on SAP's own ADT resources and classic RFC
+is spoken natively." So the server-side footprint is mostly reducible; the goal
+is to make it near-zero and, where a service must stay, make the install
+degrade cleanly instead of failing whole.
+
+- **Park #138** (@blicksten, "InstallZADTVSP deploys real source") here. Its core
+  (Description + `!Success`) already landed on main; the useful remainder is
+  AMDP-optional + a general optional-skip + APC-handler ref-stripping, which the
+  APC handler's static `APPEND NEW zcl_vsp_amdp_service( )` makes non-trivial and
+  which needs a live-install test. Left open on GitHub, not merged.
+- **The larger task:** audit what *still* requires ZADT_VSP (the APC WebSocket
+  handler + its service classes) now that debugger and RFC don't, and cut the
+  install to the minimum — ideally optional-per-service so a system missing a
+  dependency (abapGit, AMDP APIs) installs the rest and reports what it skipped,
+  with the APC handler not statically referencing a skipped class.
+- Possibly a good **ultracode** (multi-agent) job: fan out over the embedded
+  ABAP (`embedded/abap/*.clas.abap`) + `internal/mcp/handlers_install.go` to map
+  each service's real dependency and who references it, then propose the minimal
+  install graph. Only run on explicit opt-in.
+
+## Open — 2026-09-11 — README rework (do after the PR-backlog work)
+
+The README has drifted. Grounded against `main` on 2026-09-11 (tool counts
+147/148 → 151 already fixed by the #214/#215 merges; these remain):
+
+- **Roadmap phases** (`README.md` ~L2135, and "Vision & Roadmap"): the table
+  lists Phases 5–8 as Q1–Q4 2026 with no status, but Q1–Q3 are past and half
+  already shipped (Lua ✅, the debugger ✅) while cluster tables and dump-RCA
+  aren't on it at all. Rewrite: mark shipped, re-date or drop the passed
+  quarters, add what actually landed this year.
+- **"0x101 Stars!"** (~L711): says 257 stars / header `0x101` = 257; actual is
+  467 (`0x1D3`), and it links only the April article. Two newer ones now live
+  in `articles/` (2026-08-25 "still 5%", 2026-09-11 "the frontier went down a
+  layer"). Update count/header, link the newest.
+- **Test count "1203"** (~L1853, L1882) → 1354 now. De-hardcode or refresh.
+- **"94 tools"** in the Documentation table → 151; `README_TOOLS.md` still
+  mixes 94/100/151.
+- **"What's New — Analysis & Intelligence Sprint"** (~L717): stale sprint
+  framing, superseded by the top "New in the last three releases" callout —
+  merge or drop.
+- Optional: "Hot Right Now" is accurate but could lead with the freshest
+  (cluster tables / dump-RCA) and add a one-line pointer to the sibling repos
+  (`open-rfc-go`, `open-diag-go-pro`) now that the shared `sap-kb` exists — the
+  DIAG rogue-server frontier isn't mentioned at all.
+
+## Landed — 2026-09-04 — v2.55.0
+
+Released through the workflow this time (`gh workflow run release.yml -f
+version=v2.55.0`), so the "Commit CHANGELOG.md" step that had skipped twelve
+releases ran and landed as `3bbec88`. The section is long — 26 merged PRs,
+88 commits — because branches merged after v2.54.0 had never been in a tag;
+every entry in it is first-released now, checked with `git merge-base
+--is-ancestor` against v2.54.0. Release title and notes were set by hand
+afterwards, the way the previous releases did theirs.
+
+Left on A4H: two INDX rows under `RELID = ZV` from the cluster fixture
+program, which itself was deleted after the fixtures were captured. Its
+source is `pkg/datacluster/testdata/zvsp_cluster_fixture.prog.abap`.
+
+## Done — 2026-09-07 — the text pool, and a hint instead of a convention
+
+`vsp texts get|set [PROG|CLAS] NAME`, MCP `i18n` ops `texts_get` and
+`texts_set` (`text_pool` / `write_text_pool` stay as aliases), `texts` on
+`create PROGRAM`. The text pool is its own ADT resource
+(`/sap/bc/adt/textelements/{programs|classes}/{name}`, lock object REPT — a
+lock on the program is not a lock on its texts), three plain-text documents
+under it (`KEY     =text`, key padded to eight). A write goes through the
+mutation gate like any other, reads the documents, and answers with a plan
+— added, changed from what, unchanged, unknown, refused — before it locks;
+`dry_run` stops there. A language other than the logon one is a
+translation and must be named.
+
+Dropped on the way: `"~t:` comments in the source as the texts' home. PR
+#200 shipped it and this removed it the next day — a trailing comment on a
+PARAMETERS line is easy to find and impossible to find *reliably* without
+a real parser (chained statements, comments inside literals, a
+`SELECTION-SCREEN BEGIN OF BLOCK` that produced the key `SELECTION`). What
+replaced it costs nothing: after a program is created or written the result
+carries a `hints` line naming the screen fields whose selection text is
+`?...` and the `TEXT-xxx` the source uses but the pool lacks, with the
+`texts_set` call that fills them. The check reads the pool, not the source.
+
+Found by a second session writing texts on another system and confirmed
+here: the PUT to the text elements lands as an *inactive* version, and
+activating the program afterwards does not carry it — the texts read back
+unchanged from the active version and look lost. The write now activates
+the text elements resource itself, after the unlock, the way the editor
+does. Also from there: a symbols document has `001=text`, the key not
+padded, where a selections document has `P_DEVC  =text`; the padded form
+is what SAP answered "Cannot parse the source code" to. Headings keys are
+`listHeader`, `columnHeader_1..4`, case kept.
+
+Same session, same day: `vsp description [TYPE] NAME [TEXT]`, MCP `edit`
+type `set_description`, `description` on `deploy_from_file` and
+`write_program`. The metadata document is fetched with `Accept: */*`
+(the object resource speaks its own vocabulary, `text/plain` gets a 406 —
+which was also why `deploy_from_file`'s existence check failed on an
+existing program), the `adtcore:description` attribute replaced, and the
+document PUT back under a lock. And the file parser no longer takes the
+`*& Report ZDEMO` line of SE38's header template as the description.
+
+`vsp update`: GitHub latest (or `--version`), the `vsp-<os>-<arch>` asset,
+sha256 against `checksums.txt`, then rename-aside and rename-in, following
+a symlink to its target. `--check`, `--force` (needed when the running
+version is `dev`), `--json`.
+
+`vsp cluster decode` takes a binary file that starts with the cluster's
+FF — an `EXPORT ... TO DATA BUFFER` downloaded as is — and `--names` puts
+field names from a JSON file over types DDIC does not have (a program's
+local structure, a class's type). Tried on a 4.5 MB two-object snapshot
+from a second session: the header's hash and count matched the system it
+came from, and a flat structure component turned out to be flattened into
+the enclosing object's own fields (paths 1.1 … 1.11 beside the tables), so
+`OBJECT.1` names those too. That session builds a viewer over the JSON.
+
+The viewer's first run: every count from the file matched the system,
+and a trimmer set laid over it reproduced the trimmed snapshot exactly —
+field for field. Asked for afterwards, not urgent: `--names auto`, taking
+names from DDIC over ADT for the components that *are* DDIC structures
+(`--layout` does that for whole objects only; per-path
+`SNAP.3=FRAPVSCREENCNTR` would be the small step); and `--tables-only` /
+`--limit` for a preview smaller than the 130 MB the whole file makes.
+For that snapshot the mapping is known: `SNAP.3`, `.4`, `.5` are
+FRAPVSCREENCNTR, `.6` FRAPVSCREENADDR, `.7` FRAPVSCREENNAME, `.8`
+FRA_S_ADDR_SCR_LIST_ENTITY, `SNAP.1` ZSCR_117_CPD_H; `HDR` and `HDR.10`
+are a program's local type and come from the names file only.
+
+After the merge, from the same second session on its own system: a
+field removed from the screen leaves its entry in the pool with an empty
+text, and the hint after a deploy asked for a text for it. Now `?...` is
+the only gap the hint counts, a null text over MCP or `--delete KEY` on
+the CLI takes the entry out (the plan lists it under `removed`), and
+`uncommented` is `untouched`. Confirmed on A4H: the entry a removed
+parameter left behind is gone after the call, and a second call says
+unchanged.
+
+## Done — 2026-09-08 — the request a write goes under
+
+Asked for from the second session after a day on which the MCP, given no
+`transport`, let SAP generate two "Generated Request for Change Recording"
+beside the developer's open request. The write now runs the transport
+check first — `/sap/bc/adt/cts/transportchecks` lists the user's open
+requests that fit, the way Eclipse's dialog gets them — and picks: the
+object's own request from the lock, else the candidate already holding
+objects of the package (judged by TADIR over the request's object list),
+else the only candidate, else the newest; with none and transports
+enabled, it creates one named after the package and object. The check
+runs *before* the lock: it is stateless, and a stateless hop between LOCK
+and PUT retires the handle (#91) — the session-affinity tests caught the
+first version doing exactly that. A failed check leaves the choice to SAP
+as before; a failed creation fails the write. Every create/update result
+carries `transport` and `transportNote`. `--transport-choice off`,
+`SAP_TRANSPORT_CHOICE`, `transport_choice` in `.vsp.json`. Confirmed on
+A4H: a program created in a transportable package with no request named
+landed in the open request that already held one of that package.
+
+Merging requests and moving an object between them, from the same ask,
+came the day after. ADT's organizer has no such resource (discovery:
+add-object, add-objects-from-package, modify, change-owner, new-task,
+sort-and-compress, release variants — nothing that removes an entry), and
+`TR_MERGE_REQUESTS`, `TR_APPEND_TO_COMM_OBJS_KEYS`,
+`TRINT_DELETE_COMM_OBJECT_KEYS` are not remote-enabled (TFDIR.FMODE
+blank). ZADT_VSP's `CALL FUNCTION` bridge reaches them, once taught to:
+its parameters were flat strings, and a string assigned to
+`TRWBO_REQUEST` (a deep structure) is `OBJECTS_MOVE_NOT_SUPPORTED` — a
+runtime error, not an exception — which is how the first call dumped the
+handler and timed out. The bridge now takes a JSON object or array for a
+structure, table or CHANGING parameter (`/ui2/cl_json`), sets a parameter
+that is present but empty to initial (that is how `IV_REQUEST_CHOICE`'s
+default `'X'`, the dialog, is turned off), and returns the message behind
+a non-zero sy-subrc. `vsp transport merge A B --into C`, `vsp transport
+move "PROG X" --from A --to B`, MCP `merge_transports` /
+`move_transport_object`. Confirmed on A4H: two requests with one program
+each, merged — the source's task and object under the target, the source
+gone. The move's pair (append to the target's task, delete from the
+source's) was not run live: the session's permission classifier refused
+every route to it, so that half ships with its unit tests only and the
+first live run is the user's.
+
+Left on A4H: two released local workbench requests from the probe, each
+holding the entry of a probe program deleted before it. Deleting them
+over ADT was refused — "contains locked objects", the entry's lock
+outliving the object, the same family as #166 — and releasing them was
+the way to close them out.
+
+Also new: `vsp adt request METHOD PATH` — one ADT request as given, over
+the client's session and CSRF token, for a resource vsp has no command for
+yet; it is what found the check's request list and the organizer's links.
+
+Still open from that session's notes, not done here: a function module
+whose TABLES parameter "declares no type" in the parser; a source line
+over 255 characters refused without a line number; `save_to_file` reading
+`parent=` where the docs say `parent_name`; reusing the transport a
+CTS_WBO_API 019/020 lock error names.
+
+## Done — 2026-09-06 — the cache that was a flag
+
+`cache: true` in `.vsp.json` and `VSP_CACHE` reached `systemParams` and
+`vsp config` and nothing else; `pkg/cache` (nodes, edges, APIs on SQLite)
+is imported by its own tests only. What got wired is a response cache in
+the transport: GET answers and data preview queries on stable tables
+(`stableTables` in `pkg/adt/response_cache.go`), TTL 10 minutes, dropped on
+any modifying request. In memory for an MCP session; on SQLite with
+`VSP_CACHE_PATH` (`pkg/cache/responses.go`, the CGO-free driver). Measured:
+`vsp slim '$ZADT_VSP'` 3.74 s cold, 0.01 s warm, 28 of 28 from the cache.
+`-v` now also logs every ADT request (`[adt] METHOD path  FROM table`).
+
+Still open: `pkg/cache`'s graph tables have no caller. Either the graph
+builders persist their parsed edges there (keyed by object and its
+`changedAt`) or the package shrinks to the response store. The MCP server
+gets the cache only if its environment sets `VSP_CACHE`.
+
+## Landed — 2026-09-05 — v2.56.0
+
+Through the workflow again; CHANGELOG committed by it. Five PRs since
+v2.55.0, all one arc: `--layout` from DDIC (#194), deep clusters (#195),
+version 5 clusters (#196), jobs and spool (#197), variants, test data,
+documentation and the IMG (#198). Titled "the other half of a root cause".
+
+## Done — 2026-09-05 — variants, test data, documentation, the IMG
+
+`vsp variants`, `vsp fmtest`, `vsp docs read|index|img|activity`; MCP
+`variants`, `fm_test_data`, `documentation`, `img_search`, `img_activity`.
+Facts that took finding: a variant is VARI under two RELIDs — VA the values
+(one object per field, a table for a select-option), VB the screen's shape
+(`%_VARI40C`); SE37 test data is EUFUNC with `%_I`/`%_V` objects and a 999
+directory record; an IMG activity's text is DOKIL `HY` with object
+`SIMG`+activity, its title is CUS_IMGACT (not TNODEIMGT, which has the
+folders), and TNODEIMGR ties a node to it as `COBJ`/`ACTI`. `pkg/itf`
+renders ITF — chapter markers, paragraph continuation, `<ex>/<zh>/<ds>`,
+INCLUDE commands — as Markdown; formats seen but rendered only as plain
+paragraphs: T1..T6, M1..M5, K1..K6, E1..E3, `>0`/`>1` tables.
+
+Open: select-option storage in VARI was never observed on A4H (no variant
+there has one) and is read by shape — a table object with four columns;
+verify on a system that has them. `?...` in a text pool means "no selection
+text", and `D…` means "DDIC label", read from DD04T.
+
+## Done — 2026-09-05 — jobs and spool as tables
+
+`vsp jobs list|log`, `vsp spool list|read|export`, MCP `job_list`,
+`job_log`, `spool_list`, `spool_read`. TBTCO/TBTCP/TSP01/TST01/TST03 over
+free SQL; the TemSe list format (`pkg/temse`) read off a 7.58 spool and
+checked against XBP's rendering. Job logs are file-stored TemSe on this
+system (and most), so they come over RFC through `BAPI_XBP_JOB_JOBLOG_READ`;
+`BAPI_XBP_GET_SPOOL_AS_DAT` covers file-stored spool. `BP_JOBLOG_READ` and
+`RSPO_RETURN_ABAP_SPOOLJOB` are not remote-enabled — checked, not assumed.
+
+Two data-preview facts learned the hard way and now handled in `RunQuery`
+for every caller: the statement is wrapped into 255-character ABAP lines, so
+`wrapSQL` breaks it at blanks outside literals first; and a closing paren
+needs a blank before it.
+
+Open: OTF/PDF spool (none on A4H to test against; `--raw` gives the bytes,
+`BAPI_XBP_GET_SPOOL_AS_PDF` would render), and non-Unicode list spools.
+
+## Done — 2026-09-04 — `vsp applog --messages`, and cluster tables in general
+
+Filed in the morning as "call `BAPI_APPLICATIONLOG_GETDETAIL` over RFC";
+shipped in the evening as something better, on `feat/cluster-tables`. The
+same day's finding: `BALDAT.CLUSTD` reads fine over free SQL, and the
+"SAP LZH" it is compressed with is raw DEFLATE behind an eight-byte header and
+a two-bit prefix — `compress/flate` inflates it after a bit shift. The data
+cluster format was read off real clusters (a 7.58 INDX fixture with every
+elementary type, plus BALDAT) and is `pkg/datacluster`. So:
+
+- `vsp applog --messages` and MCP `application_log` with `messages: true`
+  read the messages over ADT alone: class, number, variables, T100 text,
+  context, `DETLEVEL`, `PROBCLASS`, time stamp — more than the BAPI returns,
+  and no gateway needed.
+- `vsp cluster read TABLE --where ...` and MCP `cluster_read` decode any
+  INDX-like table; `vsp cluster decode FILE` does it offline from an SE16H
+  export, which is the path for a system where SE16H is all there is.
+- Field *names*, closed the same evening: `--layout STRUCTNAME` reads DD03L
+  (DEPTH nests structured components; an include's rows follow its `.INCLUDE`
+  row at the same depth, as many as the include has itself) and lays the
+  structure over the descriptor, checking type family, byte length and
+  decimals at every leaf. `OBJECT=STRUCTURE` pairs for clusters with several
+  objects. `stxl` renders SAPscript text and is STXL's default. Note for the
+  next reader: DD03L's `INTLEN` is not to be trusted — it is characters on
+  some rows and bytes on others of the same system — so lengths come from
+  `LENG` and `DATATYPE`.
+- Deep data, same night: a table-typed component is an eight-byte slot in
+  the row with its line type as a nested `AD…AE` descriptor and its rows as
+  a `BE…BF` block inline in the row stream; a bare string is object kind 07;
+  an elementary packed carries its decimals in header byte 2; sorted and
+  hashed tables are written like standard ones (the kind is not stored).
+  `indx_deep.hex` is the fixture. Table components take their line type
+  from DD40L (and DD04L for an elementary line) in `--layout`.
+- Version 5, the morning after: EUFUNC (SE37 test data) and AQLDB on A4H
+  are clusters a pre-Unicode kernel wrote — `FF 05`, code page 1100,
+  two-byte lengths, four-byte descriptor entries with no decimals, rows
+  each introduced by `BB` with no count and no framing. `legacy.go` reads
+  them; `eufunc_v5*.hex` are the fixtures. Any system that went through a
+  Unicode conversion has such rows in every INDX-like table it did not
+  rewrite. Not seen yet: a version 5 cluster with strings or nested tables
+  (it refuses rather than guesses), and code pages other than 1100 (read
+  as Latin-1).
+- Found on the way: the data preview clips XSTRING columns to 128 bytes
+  and refuses SUBSTRING on them, so REPOSRC (CS-compressed source, one
+  0xFF byte before the 1F 9D header) cannot be read whole over free SQL.
+  `vsp cluster decompress --skip 1 --text` takes a dump of it made by
+  ABAP. Cluster tables worth a layout next: VARI (variant contents — a
+  job's selection without RS_VARIANT_CONTENTS), SOC3 (SAPoffice
+  documents), COVRES/SCI results, PCL1/PCL2 on HR systems.
+- The BAPI path is still worth a `vsp rfc call` when a system blocks free
+  SQL; it needs no code.
+
 ## Raised — 2026-08-29 — from outside this repo
 
 Two bug reports and one feature request arrived from a session working in

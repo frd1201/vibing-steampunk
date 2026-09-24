@@ -69,6 +69,9 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 		Query:    params,
 		Accept:   "application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result",
 		Stateful: true, // Lock handles are session-specific — force stateful (issue #88)
+		// Behind a session-holding proxy, every chain starts in its own context:
+		// one reused across chains loses the activation worklist entry.
+		FreshContext: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("locking object: %w", err)
@@ -100,6 +103,8 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 				"or hyperfocused mode locking the object as read-only",
 			objectURL, result.ModificationSupport)
 	}
+
+	c.noteLockOpened(result.LockHandle)
 
 	return result, nil
 }
@@ -183,6 +188,14 @@ func (c *Client) UnlockObject(ctx context.Context, objectURL string, lockHandle 
 		return fmt.Errorf("unlocking object: %w", err)
 	}
 
+	// Only a *successful* unlock ends the window. A failed one may have left
+	// the lock held, and suppressing a ping is the cheaper mistake.
+	c.noteLockClosed(lockHandle)
+
+	// The chain is done with its stateful context; behind a session-holding
+	// proxy, retire it rather than leave it to the session timeout.
+	c.transport.ReleaseProxyContext(ctx)
+
 	return nil
 }
 
@@ -200,6 +213,12 @@ func (c *Client) UpdateSource(ctx context.Context, objectSourceURL string, sourc
 		ObjectURL: objectSourceURL,
 		Transport: transport,
 	}); err != nil {
+		return err
+	}
+	// The caller may have read this object before preparing its replacement.
+	// Read it again after taking the stateful MODIFY lock, so another editor
+	// cannot be silently overwritten between that read and this PUT.
+	if err := c.verifyExpectedSourceHash(ctx, objectSourceURL); err != nil {
 		return err
 	}
 
@@ -257,7 +276,10 @@ type CreateObjectOptions struct {
 	Description string              `json:"description"`
 	PackageName string              `json:"packageName"`
 	Transport   string              `json:"transport,omitempty"`
-	Responsible string              `json:"responsible,omitempty"`
+	// Chosen, when given, receives the request picked for a transportable
+	// object created with no Transport named — reused or created — and why.
+	Chosen      *TransportChoice `json:"-"`
+	Responsible string           `json:"responsible,omitempty"`
 	// For function modules - the function group name
 	ParentName string `json:"parentName,omitempty"`
 	// For packages - the software component (required for transportable packages)
@@ -274,6 +296,19 @@ type CreateObjectOptions struct {
 	BindingType string `json:"bindingType,omitempty"`
 	// For SRVB: binding version ("V2" or "V4")
 	BindingVersion string `json:"bindingVersion,omitempty"`
+
+	// IAM options
+	// For SIA6: application type, e.g. "EXT" (external app) or "IBS"
+	// (generated business service). Defaults to EXT.
+	AppType string `json:"appType,omitempty"`
+	// For SIA6: the object the app stands for, e.g. the generated communication
+	// scenario on an IBS app. Empty for a plain external app.
+	SecondaryID string `json:"secondaryID,omitempty"`
+	// For SIA7: the business catalog receiving the app.
+	BusinessCatalogID string `json:"businessCatalogID,omitempty"`
+	// For SIA7: the IAM app being assigned.
+	AppID string `json:"appID,omitempty"`
+
 	// For SRVB: category per SAP domain SRVB_BND_CATEGORY:
 	// "0" = UI (User Interface), "1" = A2X (Application to X users, i.e. Web API)
 	BindingCategory string `json:"bindingCategory,omitempty"`
@@ -287,6 +322,11 @@ type objectTypeInfo struct {
 	creationPath string
 	rootName     string
 	namespace    string
+	// bodyBuilder, when set, replaces the generic create payload for this type.
+	// Types whose ADT resource needs a nested <content> block register one from
+	// their own file, so a new type is additive rather than another branch in
+	// buildCreateObjectBody.
+	bodyBuilder func(opts CreateObjectOptions, typeInfo objectTypeInfo, responsible string) string
 }
 
 var objectTypes = map[CreatableObjectType]objectTypeInfo{
@@ -450,6 +490,13 @@ func (c *Client) objectExistsByURL(ctx context.Context, objectURL string) (bool,
 // returned PartialCreateError. Manual recovery hints are only added
 // when our best-effort attempt could not finish.
 func (c *Client) reconcileFailedCreate(ctx context.Context, opts CreateObjectOptions, createErr error) error {
+	// An already-exists response proves the object predates this create attempt.
+	// It is not partial persistence owned by this request, so reconciliation
+	// must never lock or delete it.
+	if isAlreadyExistsError(createErr) {
+		return createErr
+	}
+
 	objectURL := GetObjectURL(opts.ObjectType, opts.Name, opts.ParentName)
 	if objectURL == "" {
 		// Object type we cannot URL-encode → no probe possible.
@@ -471,6 +518,20 @@ func (c *Client) reconcileFailedCreate(ctx context.Context, opts CreateObjectOpt
 	pce := c.cleanupPartialObject(ctx, objectURL, opts.PackageName, opts.Transport)
 	pce.OriginalErr = createErr
 	return pce
+}
+
+func isAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || (apiErr.StatusCode != http.StatusBadRequest && apiErr.StatusCode != http.StatusConflict) {
+		return false
+	}
+	message := strings.ToLower(apiErr.Message)
+	return strings.Contains(message, "exceptionresourcealreadyexists") ||
+		strings.Contains(message, "already exists") ||
+		strings.Contains(message, "does already exist")
 }
 
 // cleanupPartialObject runs the best-effort compensating cleanup for a
@@ -660,6 +721,26 @@ func (c *Client) CreateObject(ctx context.Context, opts CreateObjectOptions) err
 		return err
 	}
 
+	// A transportable object with no request named: pick one the way the
+	// editor would, rather than let SAP generate a request per write.
+	if opts.Transport == "" && opts.ObjectType != ObjectTypePackage && opts.PackageName != "" && !strings.HasPrefix(opts.PackageName, "$") && c.config.Safety.TransportChoice != "off" {
+		if objectURL, uerr := c.buildObjectURLWithParent(opts.ObjectType, opts.Name, opts.ParentName); uerr == nil {
+			choice := c.planTransport(ctx, "", objectURL, opts.PackageName)
+			if choice.Err != nil {
+				return choice.Err
+			}
+			if choice.Transport != "" {
+				if err := c.checkTransportableEdit(choice.Transport, "CreateObject"); err != nil {
+					return err
+				}
+				opts.Transport = choice.Transport
+			}
+			if opts.Chosen != nil {
+				*opts.Chosen = *choice
+			}
+		}
+	}
+
 	// Package creation validation: local packages always allowed, transportable requires opt-in
 	if opts.ObjectType == ObjectTypePackage && !strings.HasPrefix(opts.Name, "$") {
 		// Transportable package - check if transports are enabled
@@ -750,6 +831,11 @@ func buildCreateObjectBody(opts CreateObjectOptions, typeInfo objectTypeInfo, de
 	responsible := opts.Responsible
 	if responsible == "" {
 		responsible = defaultResponsible
+	}
+
+	// A type that registered its own builder owns its whole payload.
+	if typeInfo.bodyBuilder != nil {
+		return typeInfo.bodyBuilder(opts, typeInfo, responsible)
 	}
 
 	// For packages, use special structure with attributes element
@@ -955,6 +1041,10 @@ func (c *Client) DeleteObject(ctx context.Context, objectURL string, lockHandle 
 		return fmt.Errorf("deleting object: %w", err)
 	}
 
+	// A delete consumes the handle without an UNLOCK ever being sent, which is
+	// how a lock-window counter ends up permanently non-zero.
+	c.noteLockClosed(lockHandle)
+
 	return nil
 }
 
@@ -1143,6 +1233,9 @@ func (c *Client) UpdateClassInclude(ctx context.Context, className string, inclu
 		ObjectURL: sourceURL,
 		Transport: transport,
 	}); err != nil {
+		return err
+	}
+	if err := c.verifyExpectedSourceHash(ctx, sourceURL); err != nil {
 		return err
 	}
 

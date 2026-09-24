@@ -177,14 +177,35 @@ Data element labels — short, medium, long, heading:
 Message class texts:
   SAP(action="i18n", params={"op": "message_class_texts", "name": "ZVSP_GIT", "language": "EN"})
 
-A report's selection texts and text symbols — program_name here, not name:
-  SAP(action="i18n", params={"op": "text_pool", "program_name": "ZDEMO_REPORT", "language": "EN"})
+A report's or a class's text pool — selection texts (S), text symbols (I), headings (H):
+  SAP(action="i18n", params={"op": "texts_get", "program_name": "ZDEMO_REPORT"})
+  SAP(action="i18n", target="CLAS ZCL_DEMO", params={"op": "texts_get"})
 
 What differs between two languages — named separately, not as a list:
   SAP(action="i18n", params={"op": "compare_languages", "object_url": "/sap/bc/adt/oo/classes/zcl_demo", "source_language": "EN", "target_language": "DE"})
 
 Writing needs a lock_handle from a lock taken first, and changes the system:
   SAP(action="i18n", params={"op": "write_message_texts", "name": "ZVSP_GIT", "language": "DE", "lock_handle": "...", "texts": []})
+  SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN", "texts": {"P_DEVC": "Package to scan"}})
+  SAP(action="i18n", params={"op": "texts_set", "program_name": "ZDEMO_RUN", "texts": {"selections": {"S_OBJ": "Object names"}, "symbols": {"001": "Nothing found"}}, "dry_run": true})
+      texts_set needs no lock_handle: the text pool is its own resource, locked and released in the call.
+      The answer is a plan — added, changed (from what), unchanged, unknown (not on the screen), refused —
+      and dry_run stops at the plan. "language" names a translation; without it the logon language is written.
+      A null text ({"P_MODE": null}) removes the key — a field gone from the screen leaves its entry behind.
+      After create PROGRAM / write_program the result carries a "hints" line naming screen fields with no
+      selection text and TEXT-xxx the source uses but does not define. create PROGRAM also takes "texts".
+      The written texts are activated in the same call; without that they stay an inactive version.
+
+A write to a transportable object with no "transport" named picks a request the way Eclipse's
+dialog would: the object's own, else your open request that already holds the package's objects,
+else the only one that fits, else the newest; with none and --enable-transports one is created.
+The result says which under "transport" and why under "transportNote". SAP no longer generates a
+"Generated Request for Change Recording" per write. --transport-choice off restores that.
+
+The description — SE38's title — of an existing object, without touching its source:
+  SAP(action="edit", target="PROG ZDEMO_XFER", params={"type": "set_description", "description": "DPL snapshot transfer"})
+      PROG, INCL, CLAS, INTF, FUGR, FUNC (with "parent"), TABL, DDLS; without "description" it reads the current one.
+      deploy_from_file and write_program take "description" too and write it after the source.
 
 write_labels is not implemented and refuses. What it used to send was a
 four-field document to a resource that takes the data element's whole
@@ -363,11 +384,51 @@ Runtime errors (ST22) — a listing, and a post-mortem around one dump:
   dump_id takes "latest", any part of an id from list_dumps, or a whole id.
   filters shared by all six: program, error_type, user, since, until (YYYY-MM-DD), max_results
 
-Application log (SLG1 headers, read with free SQL — no RFC, no gateway, no Z code):
+Application log (SLG1, read with free SQL — no RFC, no gateway, no Z code):
   SAP(action="analyze", params={"type": "application_log", "program": "ZDEMO_POST", "max_results": 20})
   SAP(action="analyze", params={"type": "application_log", "user": "TESTUSER", "since": "2026-08-01"})
-  SAP(action="analyze", params={"type": "application_log", "object": "ZDEMO_LOG", "subobject": "POST"})
-      headers only: message bodies live in a cluster table ADT will not read
+  SAP(action="analyze", params={"type": "application_log", "object": "ZDEMO_LOG", "subobject": "POST", "messages": true})
+      headers by default; messages=true decodes the BALDAT cluster too: class, number, variables,
+      text from T100, context, detail level
+
+Spool and background jobs (SP01/SM37 over free SQL; the job log and file-stored spool over XBP/RFC):
+  SAP(action="analyze", params={"type": "spool_list", "since": "2026-09-01", "user": "TESTUSER", "max_results": 20})
+  SAP(action="analyze", params={"type": "spool_list", "job": "ZDEMO_NIGHTLY"})
+  SAP(action="analyze", params={"type": "spool_read", "number": 27302})
+      the decoded list: pages, lines, the format commands; via="rfc" for spool kept in files
+  SAP(action="analyze", params={"type": "job_list", "since": "2026-09-01", "status": "A"})
+  SAP(action="analyze", params={"type": "job_list", "program": "ZDEMO_NIGHTLY_RUN"})
+      each job with its steps: program, variant, user, the spool number each step wrote
+  SAP(action="analyze", params={"type": "job_log", "job": "ZDEMO_NIGHTLY", "count": "22554500"})
+
+What the system is set up to do — variants, test data, documentation, the IMG (free SQL):
+  SAP(action="analyze", params={"type": "variants", "report": "ZDEMO_NIGHTLY_RUN"})
+  SAP(action="analyze", params={"type": "variants", "report": "ZDEMO_NIGHTLY_RUN", "variant": "MONTH_END"})
+      every field with its label, kind (P/S), type and value or ranges — what the job selects
+  SAP(action="analyze", params={"type": "fm_test_data", "function": "ZDEMO_CALCULATE_TAX"})
+      SE37's saved test sets: inputs, outputs, runtime, return code, and the interface as saved
+  SAP(action="analyze", params={"type": "documentation", "class": "DE", "object": "BALLEVEL"})
+  SAP(action="analyze", params={"type": "documentation", "object": "BAL_LOG_CREATE"})
+      SE61 text as Markdown, includes resolved; without class, the index of what exists.
+      classes: DE data element, DT domain, TB table, RE report, FU function module, CL class,
+      IF interface, NA message, TX general text, HY IMG activity
+  SAP(action="analyze", params={"type": "img_search", "text": "delta link"})
+      IMG nodes whose title matches, the path to each, and the activity or document it opens
+  SAP(action="analyze", params={"type": "img_activity", "activity": "/IWBEP/CP_DELETE_JOB"})
+      transaction, paths, and the activity's documentation
+
+Cluster tables (BALDAT, INDX, STXL, ... — EXPORT data clusters decoded here, no IMPORT needed):
+  SAP(action="analyze", params={"type": "cluster_read", "table": "INDX", "where": "relid = 'ZV'"})
+  SAP(action="analyze", params={"type": "cluster_read", "table": "INDX", "where": "relid = 'ZD'", "layout": "ZDEMO_S_HEADER"})
+  SAP(action="analyze", params={"type": "cluster_read", "table": "INDX", "where": "...", "layout": "HDR=ZDEMO_S_HEADER,ITEMS=ZDEMO_S_ITEM"})
+  SAP(action="analyze", params={"type": "cluster_read", "table": "STXL", "where": "tdname = 'Z...'"})
+  SAP(action="analyze", params={"type": "cluster_read", "table": "BALDAT", "where": "relid = 'AL' AND log_handle = '...'", "layout": "applog"})
+      every exported object with its fields typed and decoded. The cluster holds no field names:
+      without a layout they are numbered; a DDIC structure (read from DD03L, includes resolved) names
+      them, per object as OBJECT=STRUCTURE, and is refused when it does not fit rather than guessed.
+      stxl (the default on STXL) renders SAPscript text; applog prints BALDAT messages.
+      Version 5 clusters (pre-Unicode rows, e.g. EUFUNC test data, AQLDB) are read as well.
+      max_results caps database rows (fragments), 200 by default.
 
 Profiler traces:
   SAP(action="analyze", params={"type": "list_traces"})
@@ -399,11 +460,19 @@ Info:
 
 Transports:
   SAP(action="system", params={"type": "list_transports"})
+      defaults: request_type KWT, request_status DR, source auto (organizer tree → search configuration → E070/E07T)
+  SAP(action="system", params={"type": "list_transports", "request_status": "D"})        - modifiable only
+  SAP(action="system", params={"type": "list_transports", "source": "config"})           - as Eclipse: saved search configuration
+  SAP(action="system", params={"type": "list_transports", "request_status": "R", "released_from": "20260101", "released_to": "20261231"})
   SAP(action="system", params={"type": "get_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "create_transport", "description": "...", "package": "$TMP"})
   SAP(action="system", params={"type": "release_transport", "transport": "A4HK900001"})
   SAP(action="system", params={"type": "delete_transport", "transport": "A4HK900001"})
+  SAP(action="system", params={"type": "merge_transports", "source": ["A4HK900001", "A4HK900003"], "target": "A4HK900005"})
+  SAP(action="system", params={"type": "move_transport_object", "object": "PROG ZDEMO", "from": "A4HK900001", "to": "A4HK900005"})
+      SE09's Merge Requests and a single entry's move, through ZADT_VSP's function bridge (needs ZADT_VSP)
   SAP(action="system", params={"type": "get_user_transports", "user_name": "DEVELOPER"})
+      same parameters as list_transports (request_type, request_status, released_from/to, targets, source, config_uri)
   SAP(action="system", params={"type": "get_transport_info", "object_url": "...", "dev_class": "$TMP"})
 
 Git/abapGit:

@@ -25,6 +25,16 @@ type Client struct {
 	keepAliveCancel context.CancelFunc
 	keepAliveDone   chan struct{}
 	keepAliveMu     sync.Mutex
+
+	// Lock handles believed outstanding, so the keep-alive ping does not
+	// retire the session one of them is bound to. See lock_window.go.
+	locks lockWindow
+
+	// rfcFetcherFactory, when non-nil, overrides the default WebSocket-backed
+	// RFC source fetcher used by GetEnhancement's fallback path. Production
+	// callers leave this nil; tests inject a stub to avoid opening a real
+	// WebSocket. See enhancements.go.
+	rfcFetcherFactory func(ctx context.Context) (rfcSourceFetcher, error)
 }
 
 // NewClient creates a new ADT client with the given configuration.
@@ -78,6 +88,16 @@ func (c *Client) StartKeepAlive(interval time.Duration, verbose bool) {
 				}
 				return
 			case <-ticker.C:
+				// A ping is an ordinary request, and an ordinary request is
+				// stamped stateless — which retires the session a lock handle
+				// lives in. Skipping a tick costs nothing; sending it during a
+				// write costs the write (#168).
+				if c.lockOutstanding() {
+					if verbose {
+						fmt.Fprintf(LogOutput, "[KEEPALIVE] Skipped: a lock is outstanding\n")
+					}
+					continue
+				}
 				if err := c.transport.Ping(ctx); err != nil {
 					if ctx.Err() != nil {
 						return // context cancelled, expected
@@ -360,6 +380,34 @@ func (c *Client) searchObject(ctx context.Context, query, objectType string, max
 	}
 
 	return ParseSearchResults(resp.Body)
+}
+
+// ResolveObjectRef converts a "TYPE NAME" shorthand (e.g. "INCL ZREP_F01", "PROG ZREPORT")
+// into the (objectURL, objectName) pair needed for activation or other ADT operations.
+// The name is returned in UPPERCASE; the URL uses lowercase path encoding.
+func (c *Client) ResolveObjectRef(typeAndName string) (objectURL, objectName string, err error) {
+	parts := strings.Fields(strings.ToUpper(strings.TrimSpace(typeAndName)))
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("expected \"TYPE NAME\", got %q", typeAndName)
+	}
+	objType, name := parts[0], parts[1]
+	encoded := url.PathEscape(strings.ToLower(name))
+	switch objType {
+	case "PROG":
+		return "/sap/bc/adt/programs/programs/" + encoded, name, nil
+	case "INCL":
+		return "/sap/bc/adt/programs/includes/" + encoded, name, nil
+	case "CLAS":
+		return "/sap/bc/adt/oo/classes/" + encoded, name, nil
+	case "INTF":
+		return "/sap/bc/adt/oo/interfaces/" + encoded, name, nil
+	case "FUGR":
+		return "/sap/bc/adt/function/groups/" + encoded, name, nil
+	case "DDLS":
+		return "/sap/bc/adt/ddic/ddl/sources/" + encoded, name, nil
+	default:
+		return "", "", fmt.Errorf("unsupported object type %q (supported: PROG, INCL, CLAS, INTF, FUGR, DDLS)", objType)
+	}
 }
 
 // --- Program Operations ---
@@ -1085,6 +1133,15 @@ func parsePackageNodeStructure(data []byte, packageName string) (*PackageContent
 	return pkg, nil
 }
 
+// Language is the logon language the client was configured with, as an ISO
+// code ("EN") or a SAP key; empty when none was set.
+func (c *Client) Language() string {
+	if c.config == nil {
+		return ""
+	}
+	return c.config.Language
+}
+
 // --- Table Operations ---
 
 // GetTable retrieves the source/definition of a database table.
@@ -1208,7 +1265,7 @@ func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*T
 		Method:      http.MethodPost,
 		Query:       params,
 		Accept:      "application/*",
-		Body:        []byte(sqlQuery),
+		Body:        []byte(wrapSQL(sqlQuery)),
 		ContentType: "text/plain",
 	})
 	if err != nil {
@@ -1216,6 +1273,51 @@ func (c *Client) RunQuery(ctx context.Context, sqlQuery string, maxRows int) (*T
 	}
 
 	return parseTableContents(resp.Body)
+}
+
+// wrapSQL keeps every line of a statement under the data preview's limit.
+// The service puts the text into ABAP source lines of 255 characters, and a
+// token cut by that wrap — a literal, a column name — is a syntax error that
+// names half a word. Lines are broken at blanks outside quotes only, so the
+// statement means the same thing.
+func wrapSQL(query string) string {
+	const limit = 200
+	var out strings.Builder
+	lineLen := 0
+	inQuote := false
+	start := 0
+	emit := func(word string) {
+		if word == "" {
+			return
+		}
+		if lineLen > 0 && lineLen+1+len(word) > limit {
+			out.WriteByte('\n')
+			lineLen = 0
+		} else if lineLen > 0 {
+			out.WriteByte(' ')
+			lineLen++
+		}
+		out.WriteString(word)
+		lineLen += len(word)
+	}
+	for i := 0; i < len(query); i++ {
+		switch query[i] {
+		case '\'':
+			inQuote = !inQuote
+		case ' ', '\n':
+			if inQuote {
+				continue
+			}
+			emit(query[start:i])
+			start = i + 1
+			if query[i] == '\n' {
+				out.WriteByte('\n')
+				lineLen = 0
+			}
+		}
+	}
+	emit(query[start:])
+	return out.String()
 }
 
 // parseTableContents parses the XML response for table contents.
@@ -1318,13 +1420,32 @@ func (c *Client) GetTransaction(ctx context.Context, tcode string) (*Transaction
 
 // --- Type Info Operations ---
 
-// TypeInfo represents type information.
+// TypeInfo describes a DDIC data element.
+//
+// Type is the ABAP data type (CHAR, SSTRING, CURR, QUAN...), not the workbench
+// object type — a value with a Length and Decimals beside it is only meaningful
+// as the former. The workbench type ("DTEL/DE") is kept in ObjectType so the
+// root attribute is not lost.
+//
+// TypeKind is "domain" when the element takes its type from a domain, whose
+// name is then in DomainName, and "predefinedAbapType" when it declares the
+// type itself, in which case DomainName is empty.
+//
+// Shapes this was written against, read off a system rather than guessed:
+//
+//	APC_CONNECTION_ID  predefinedAbapType  ""                        CHAR     32  0
+//	AMC_CHANNEL_ID     domain              AMC_CHANNEL_ID            SSTRING 140  0
+//	DMBTR              domain              AFLE13D2O16N_TO_23D2O30N  CURR     23  2
+//	MENGE_D            domain              MENG13                    QUAN     13  3
 type TypeInfo struct {
 	Name        string
 	Type        string
 	Description string
 	Length      int
 	Decimals    int
+	TypeKind    string
+	DomainName  string
+	ObjectType  string
 }
 
 // GetTypeInfo retrieves information about a data type.
@@ -1333,18 +1454,34 @@ func (c *Client) GetTypeInfo(ctx context.Context, typeName string) (*TypeInfo, e
 
 	resp, err := c.transport.Request(ctx, fmt.Sprintf("/sap/bc/adt/ddic/dataelements/%s", typeName), &RequestOptions{
 		Method: http.MethodGet,
-		Accept: "application/xml",
+		// The versioned vocabulary type, not application/xml. This endpoint
+		// refuses the generic one with 406 "The message content is not
+		// acceptable" on every name, so this call had never returned anything
+		// to anybody. GetDataElementLabels in i18n.go hit the identical bug on
+		// the identical endpoint and was fixed there; this twin was missed, so
+		// the same 406 survived here. Keep the two in step.
+		Accept: "application/vnd.sap.adt.dataelements.v2+xml",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("getting type info: %w", err)
 	}
 
+	// The type and the lengths are CHILD ELEMENTS of dtel:dataElement, not
+	// attributes of the root. The previous mapping read them as root attributes
+	// and so returned zero for every element ever — invisibly, because the 406
+	// above meant it never got as far as parsing. Lengths arrive zero-padded to
+	// six digits ("000032", "000002"); ParseInt handles the padding.
 	type typeData struct {
 		Name        string `xml:"name,attr"`
-		Type        string `xml:"type,attr"`
+		ObjectType  string `xml:"type,attr"`
 		Description string `xml:"description,attr"`
-		Length      int    `xml:"length,attr"`
-		Decimals    int    `xml:"decimals,attr"`
+		DataElement struct {
+			TypeKind string `xml:"typeKind"`
+			TypeName string `xml:"typeName"`
+			DataType string `xml:"dataType"`
+			Length   int    `xml:"dataTypeLength"`
+			Decimals int    `xml:"dataTypeDecimals"`
+		} `xml:"dataElement"`
 	}
 
 	var td typeData
@@ -1354,10 +1491,13 @@ func (c *Client) GetTypeInfo(ctx context.Context, typeName string) (*TypeInfo, e
 
 	return &TypeInfo{
 		Name:        td.Name,
-		Type:        td.Type,
+		Type:        td.DataElement.DataType,
 		Description: td.Description,
-		Length:      td.Length,
-		Decimals:    td.Decimals,
+		Length:      td.DataElement.Length,
+		Decimals:    td.DataElement.Decimals,
+		TypeKind:    td.DataElement.TypeKind,
+		DomainName:  td.DataElement.TypeName,
+		ObjectType:  td.ObjectType,
 	}, nil
 }
 

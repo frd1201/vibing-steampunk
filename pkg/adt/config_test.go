@@ -271,12 +271,10 @@ func TestNewHTTPClient_CheckRedirectHonoursLimit(t *testing.T) {
 		t.Fatal("CheckRedirect must be set")
 	}
 
-	next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		"https://sap.example.com:44300/", nil)
+	next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://sap.example.com:44300/", nil)
 	via := make([]*http.Request, 10)
 	for i := range via {
-		via[i], _ = http.NewRequestWithContext(context.Background(), http.MethodGet,
-			"https://sap.example.com:44300/", nil)
+		via[i], _ = http.NewRequestWithContext(context.Background(), http.MethodGet, "https://sap.example.com:44300/", nil)
 	}
 
 	if err := client.CheckRedirect(next, via); err == nil {

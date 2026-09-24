@@ -11,10 +11,40 @@ S/4, AMDP needs HANA, and some ADT resources present on S/4 are absent on ERP.
 > **ADT ↔ MCP Bridge**: Gives Claude (and other AI assistants) full access to SAP ADT APIs.
 > Read code, write code, debug, deploy, run tests — all through natural language (or DSL for automation).
 >
-> **New:** the whole ABAP debugger — breakpoints, attach, stepping, call stack **and variables** —
-> runs through SAP's own ADT resources over either a classic-RFC tunnel or a plain HTTPS
-> session, with **nothing installed on the server** and no SAP SDK. The MCP debugger tools
-> are enabled by default again, because the server now holds the session they always needed.
+> **New in the last three releases** — the part of a root cause that never fit in a tool:
+>
+> - **[The MIME repository, byte-exact](#the-mime-repository-byte-exact--smw0-over-plain-adt).**
+>   Every file anyone uploaded through SMW0 — images, audio, a font, a game — read back
+>   whole. The bytes are a data cluster of 255-byte lines whose last line is padded, so
+>   the cluster cannot say where the file ends; `filesize` in WWWPARAMS can, and that is
+>   the step that makes it exact rather than nearly right. Nothing installed on the server.
+> - **[Cluster tables, decoded](#cluster-tables-decoded--baldat-indx-stxl-over-plain-adt).**
+>   BALDAT, INDX, STXL — every table an `EXPORT ... TO DATABASE` ever wrote — read over
+>   plain ADT and decoded here: SAP's LZH and LZC decompressed in Go, the cluster format
+>   walked, the fields named from DD03L. What only `IMPORT` could read, without a line of ABAP.
+> - **[A dump's own why](#post-mortem-from-a-dump-to-what-was-logged-around-it)** — `dumps --explain`
+>   now reads the whole ST22 document, not just the stack: the message it raised with its
+>   variables, the system fields, the failing source line, and the runtime's chosen variables
+>   per frame — so a stale handle or an unresolved pointer is on screen, not dug out by hand.
+> - **[The application log with its messages](#post-mortem-from-a-dump-to-what-was-logged-around-it)**,
+>   by object and date range, and the same log from a bare SE16H export of two tables.
+> - **[Spool and jobs](#jobs-and-spool--sm37-and-sp01-as-tables)** — SP01's list decoded
+>   from TemSe, a job's steps and its log, exported for the whole night in one command.
+> - **[Where the settings are](#what-is-it-set-up-to-do--variants-test-data-documentation-the-img)** —
+>   a report's variants with the screen's own labels, SE37's saved test data, SE61
+>   documentation as Markdown, and the IMG searched by title with the activity's transaction.
+> - **[Texts and the title, from the same call](#selection-texts-and-text-symbols-without-leaving-the-call)** —
+>   selection texts and text symbols written as a plan with a diff, activated so they stay,
+>   and a hint after every program create that names the fields still without one; the
+>   [description set without touching the source](#the-description-and-the-binary-itself).
+> - **`vsp update`** — the release for this platform, verified against `checksums.txt`,
+>   renamed into place of the running binary.
+> - **[A response cache](#response-cache)** that turns a 4-second `slim` into 10 ms, on
+>   Go-native SQLite when it should outlive the process.
+>
+> And still the one that started it: the whole ABAP debugger — breakpoints, attach, stepping,
+> call stack **and variables** — through SAP's own ADT resources over a classic-RFC tunnel or a
+> plain HTTPS session, with **nothing installed on the server** and no SAP SDK.
 >
 > See also: [OData ↔ MCP Bridge](https://github.com/oisee/odata_mcp_go) for SAP data access.
 >
@@ -197,9 +227,19 @@ happen again.
 ```bash
 vsp -s a4h dumps --group                          # what keeps failing, not what failed once
 vsp -s a4h dumps --similar latest                 # what else looks like this one, and how closely
-vsp -s a4h dumps --explain latest --tolerance 10m # one dump, its stack, and the log around it
+vsp -s a4h dumps --explain latest --tolerance 10m # the why: message, failing line, stack, and the log around it
 vsp -s a4h applog --program ZCL_ORDER_POST        # who logged what, and from where
 ```
+
+`--explain` reads the one formatted document ST22 keeps and pulls the causal
+detail out of it — no extra round trips. Before the stack it prints the message
+the dump raised with its own variables (`message SY 373 (type X) with -1`), the
+system fields that frame it (`SUBRC`, `FDPOS`, `PFKEY`, `TITLE`), and the source
+line it died on with a line either side, the failing one marked. `--json` adds
+a `detail` object with the full `systemFields`, `source`, and the runtime's
+`variables` per stack frame — where a stale handle or an unresolved pointer
+shows up as its value. So the answer to "why" is on screen, not reconstructed by
+hand from the raw dump.
 
 `--group` collapses dumps by runtime error and terminated program, which is
 structural. Grouping by "the same afternoon" would make a busy hour look like
@@ -252,12 +292,245 @@ missing; where-used over CROSS would supply it.
 
 All of it over plain ADT — no RFC, no gateway, no Z code. SAP's own way into the
 application log is the `BAL_*` function group, which cannot be called remotely
-by any transport; the header table is an ordinary table, so free SQL reads it
-instead.
+by any transport; the log's tables are ordinary tables, so free SQL reads them
+instead — the headers from BALHDR, and with `--messages` the messages from
+BALDAT, which is a cluster table and needs one more step:
+
+```bash
+vsp -s a4h applog --object ZDEMO_LOG --since 2026-09-01 --messages
+```
+
+```
+2026-09-04 12:00:01  ZDEMO_LOG/POST  log 22274  TESTUSER  ZCL_DEMO_POST=================CP
+    000001 E ZDEMO_MSG 017       20260904100001.5909840  Order 4711 has no delivery block
+           context ZDEMO_ORDER_KEY: 0000004711
+```
+
+### Jobs and spool — SM37 and SP01 as tables
+
+A night job failed. `vsp jobs list --since` shows it with its status, its
+steps — program, variant, user — and the spool number each step wrote;
+`vsp spool read` prints that spool, and `vsp spool export` writes every
+matching request to a directory with an index of who wrote what, when, from
+which job. All of it from TBTCO, TBTCP, TSP01 and TST03 over free SQL: the
+spool content is the TemSe object decoded here — records, print controls,
+the list format's escapes — checked line for line against what XBP returns.
+
+Two things are not tables. The job log is a TemSe object most systems keep
+in files, and so is spool on a system configured that way; both come over
+RFC through XBP, which `vsp jobs log` and `--via rfc` do. On the MCP side:
+`job_list`, `job_log`, `spool_list`, `spool_read`.
+
+```bash
+vsp -s a4h jobs list --program ZDEMO_NIGHTLY_RUN     # every job with a step running it
+vsp -s a4h spool list --job ZDEMO_NIGHTLY --top 20
+vsp -s a4h spool export --user TESTUSER --since 2026-09-01 --out ./spool
+```
+
+### What is it set up to do — variants, test data, documentation, the IMG
+
+The other half of a root cause is configuration, and it sits in tables too.
+`vsp variants` reads a report variant as a table of fields with their labels,
+kinds, types and values, from VARI and the program's selection texts; that is
+what a job's step selected, without `RS_VARIANT_CONTENTS`. `vsp fmtest` reads
+the Function Builder's saved test data from EUFUNC: every set's inputs, what
+came back, the runtime, the interface as it was. `vsp docs` renders SE61
+documentation as Markdown, includes resolved — data elements, reports,
+function modules, classes, messages — and walks the IMG: `docs img` finds
+activities and folders by their titles and gives the path to each, `docs
+activity` gives the transaction and the activity's own text. MCP: `variants`,
+`fm_test_data`, `documentation`, `img_search`, `img_activity`.
+
+```bash
+vsp -s a4h variants ZDEMO_NIGHTLY_RUN                # the variants, who made them, when
+vsp -s a4h variants ZDEMO_NIGHTLY_RUN MONTH_END --json
+vsp -s a4h fmtest STRING_CONCATENATE
+vsp -s a4h docs read DE BALLEVEL
+vsp -s a4h docs activity /IWBEP/CP_DELETE_JOB
+```
+
+### Selection texts and text symbols, without leaving the call
+
+A selection text is maintained in a screen three clicks from the code, and a
+program created over MCP has none. `vsp texts` reads and writes the text pool
+over ADT — selection texts (S) and headings (H) of a program, text symbols
+(I) of a program or a class — and a write is a plan first: what is added,
+what changes from what, what is already so, what is refused (a key the
+screen does not have, a key SAP would reject, a text past 30 characters).
+Nothing is locked when nothing differs.
+
+```bash
+vsp -s a4h texts get ZDEMO_RUN                       # S, I and H entries
+vsp -s a4h texts set ZDEMO_RUN P_DEVC="Package to scan" S_OBJ="Object names"
+vsp -s a4h texts set ZDEMO_RUN --kind I 001="Nothing found"
+vsp -s a4h texts set ZDEMO_RUN --dry-run P_DEVC="Package to scan"
+vsp -s a4h texts set CLAS ZCL_DEMO --kind I 001="Loaded"
+vsp -s a4h texts set ZDEMO_RUN --delete P_MODE            # the entry a removed field left behind
+```
+
+The text elements are their own ADT resource with their own lock; the lock,
+the write, the unlock and the activation happen in the one call. The
+activation matters: the PUT lands as an inactive version, and activating the
+program does not carry it — texts written without it read back unchanged
+from the active version and look lost. MCP: `i18n` with `op: texts_get` /
+`op: texts_set`, `create PROGRAM` takes a `texts` map, and after a program
+is created or written the result says which screen fields still have no
+text and which `TEXT-xxx` the source uses but never defines — with the call
+that sets them.
+
+### The description, and the binary itself
+
+The description is the short text SE38 shows as the title and prints at the
+head of a list. Creating over ADT sets it once, from the file's header
+comment when deploying — and SE38's own template put `*& Report ZDEMO` there,
+which became the description of more than one program. The header line is
+skipped now, and the text can be set later without touching the source:
+
+```bash
+vsp -s a4h description ZDEMO_XFER                    # what it is
+vsp -s a4h description ZDEMO_XFER "DPL snapshot transfer: download / upload / transplant"
+vsp -s a4h description CLAS ZCL_DEMO "Demo class"    # PROG, INCL, CLAS, INTF, FUGR, FUNC, TABL, DDLS
+```
+
+MCP: `edit` with `type: set_description`, and a `description` on
+`deploy_from_file` and `write_program` is written after the source.
+
+**A write with no transport named** used to leave the choice to SAP, which
+answered with a request of its own — *Generated Request for Change
+Recording* — one per write, so a day's work on one feature ended up spread
+over three requests beside the one already open. Now the write asks the
+transport check what Eclipse's dialog asks it: which of your open requests
+fit. The object's own request wins, then the one already holding objects of
+the package, then the only candidate, then the newest; with none and
+`--enable-transports`, one is created and the result says so. Every result
+carries `transport` and, when the choice was made here, `transportNote`.
+`--transport-choice off` (or `SAP_TRANSPORT_CHOICE=off`) restores the old
+behaviour.
+
+**Merging requests, moving an entry** is SE09's Utilities → Reorganize and
+nothing in ADT — the organizer's resources add objects and release, none
+removes an entry — and the function modules behind SE09 are not
+remote-enabled. They are reachable through ZADT_VSP's `CALL FUNCTION`
+bridge, which now takes JSON for structure and table parameters and turns
+a dialog off when told to:
+
+```bash
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport merge TR-A TR-B --into TR-C     # tasks and objects move, sources are deleted
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport move "PROG ZDEMO_RUN" --from TR-A --to TR-B
+```
+
+MCP: `system` with `merge_transports` (`source`, `target`) and
+`move_transport_object` (`object`, `from`, `to`). Both need ZADT_VSP on the
+system — redeploy it after this release, the bridge changed.
+
+`vsp update` fetches the latest release for this platform, compares it with
+the running version, verifies the download against the release's
+`checksums.txt`, and puts it in place of the running binary — the old one is
+renamed aside first, which is what Windows allows for a running executable.
+
+```bash
+vsp update --check                                   # vsp 2.56.0, latest is 2.57.0: update available
+vsp update                                           # download, verify, replace
+vsp update --version v2.55.0 --force                 # a particular release, newer or not
+```
+
+### Cluster tables, decoded — BALDAT, INDX, STXL over plain ADT
+
+BALDAT is one of a family: INDX, STXL, and every table an `EXPORT ... TO
+DATABASE` writes to. The rows are ordinary — a key, a sequence number, a byte
+count and a RAW column — and ADT's data preview returns all of them. What
+nothing on the SAP side does for a remote caller is turn the RAW column back
+into data: it is an SAP-compressed data cluster, and only `IMPORT` reads it.
+
+`vsp cluster` does it here. SAP's "LZH" turned out to be DEFLATE behind an
+eight-byte header and a two-bit prefix, so the standard library inflates it;
+"LZC" is compress(1) and is ~100 lines. The cluster itself carries a type
+descriptor for every exported object — kind, length and decimals of every
+field, nested for structures, a line type for a table inside a structure —
+so the values come back typed: packed numbers as decimals, time stamps with
+their microseconds, strings from their out-of-line segments, a table-typed
+component as its rows. What it does not carry is field names. `--layout`
+supplies them: a DDIC structure is read from DD03L, includes resolved, and
+laid over the descriptor field by field — type family, byte length and
+decimals checked at every leaf, so a structure that does not fit is refused
+with the field named rather than guessed at. Two layouts are built in:
+`applog` for BALDAT, and `stxl` for SAPscript text, which STXL gets by
+default.
+
+```bash
+vsp cluster decode snapshot.bin --json                 # an EXPORT TO DATA BUFFER, downloaded, decoded offline
+vsp -s a4h cluster read INDX --where "relid = 'ZV'" --schema   # every object, every field typed
+vsp -s a4h cluster read INDX --where "relid = 'ZD'" --layout ZDEMO_S_HEADER
+vsp -s a4h cluster read INDX --where "relid = 'ZD'" --layout "HDR=ZDEMO_S_HEADER,ITEMS=ZDEMO_S_ITEM"
+vsp -s a4h cluster read STXL --where "tdname = 'ZDEMO_TEXT'"   # the text, lines and formats
+vsp -s a4h cluster read BALDAT --where "relid = 'AL' AND log_handle = '...'" --layout applog
+vsp cluster decode baldat.txt --layout applog                  # from an SE16H download, no system
+```
+
+The offline form is the one for a system where SE16H is all you have: export
+BALHDR to find the log handles, export the matching BALDAT rows, decode them
+on your machine. On the MCP side it is `analyze type=cluster_read`, and
+`application_log` takes `messages: true`.
+
+Verified against clusters written by a 7.58 kernel: every elementary type,
+compressed and not; DDIC-typed structures and tables; tables inside
+structures, tables inside table rows, sorted and hashed tables, tables of
+strings, bare strings — and against BALDAT from a 7.5x system. Version 5
+clusters — what a pre-Unicode kernel wrote, and what old rows still are
+after a Unicode conversion — are read too, from EUFUNC and AQLDB. The same
+reader opens VARI (report variants, one object per parameter), LTDX (ALV
+layouts), MONI (workload statistics), SOC3 (SAPoffice documents), EUDB and
+STXL on sight, and EUFUNC gives the Function Builder's saved test data:
+every parameter by name, the result, the runtime, the return code.
+
+`vsp cluster decompress` is the compression alone, for streams that are
+not clusters — REPOSRC's source column, dumped to a file by a few lines of
+ABAP, decompresses with `--skip 1 --text`.
 
 Checked on 7.50, 7.57 and 7.58. 7.50 serves the dump feed but not the detail
 resource, so there is no call stack to read there — the correlation drops that
 rung and still ranks on the rest.
+
+### The MIME repository, byte-exact — SMW0 over plain ADT
+
+Anything uploaded through SMW0 — a logo, a sound, a font, a PDF, a Z-machine
+game a websocket handler loads at runtime — is reachable, and comes back byte
+for byte.
+
+It is not a column you can select. SMW0 writes the file into `WWWDATA` as an
+INDX-style data cluster: LZH-compressed, split over as many rows as it takes,
+and inside the cluster a table of fixed **255-byte lines**. The last line is
+padded with zeroes, so the cluster alone cannot say where the file ends. The
+true length is the `filesize` parameter in `WWWPARAMS`, and truncating to it is
+the whole difference between a file and a nearly-right file.
+
+```bash
+vsp -s a4h w3mi list                                  # every MIME object with size and type
+vsp -s a4h w3mi list 'ZDEMO%'                         # SQL LIKE on the object id
+vsp -s a4h w3mi get ZDEMO_LOGO.PNG --out logo.png
+vsp -s a4h w3mi get ZDEMO_LOGO.PNG --abapgit-dir src/ # the abapGit pair, ready to commit
+```
+
+Both halves are ordinary table reads, so nothing goes on the server: no
+abapGit, no RFC, no `ZADT_VSP`. `--abapgit-dir` writes the pair abapGit
+expects — `<name>.w3mi.data.<ext>` plus `<name>.w3mi.xml`, with the object id
+escaped the way abapGit escapes it (`ZORK-MINI.Z3` → `zork-mini%2ez3`).
+
+The `filename` parameter is deliberately **not** written into that XML, and a
+test enforces it: it records the path the file was uploaded from — a user name,
+a host, a directory layout — and these files are meant to be committable.
+
+Where a wrong answer would look like a right one, it refuses instead of
+guessing. A non-zero byte past `filesize` means `filesize` and the cluster
+disagree; a cluster shorter than `filesize` means the object is truncated on
+the system. Both say so rather than hand back a plausible file.
+
+Verified on arithmetic that can fail. A 52216-byte game came out of 205 lines
+of 255 = 52275, truncated to `filesize`, and the 59 discarded bytes were all
+zero — then the file checked *itself*: a Z-machine v3 header declares its own
+length at `0x1A` and its checksum at `0x1C`, and both matched what came out.
+Two further extractions by different routes produced the identical md5. A
+single bad byte anywhere would have broken the checksum.
 
 ### What really ran: `vsp trace`
 
@@ -485,21 +758,19 @@ Tests discover embedded local test classes across the full package hierarchy —
 - **[Analysis & Refactoring Guide](docs/analysis-refactoring-guide.md)** for what these commands do
 - **[Graph Guide](docs/graph-guide.md)** for examples, data sources, and current limits
 
-## 0x101 Stars!
+## 0x1D3 Stars!
 
-Read the latest article: **[VSP IS ONLY 5% EXPLORED](articles/2026-04-07-vsp-only-5-percent-explored.md)** — 257 stars, the tool surface, compilers, graph analysis, and why 95% of the surface is still unexplored.
+Read the latest: **[The frontier went down a layer](articles/2026-09-11-the-frontier-went-down-a-layer.md)** — since April: a rogue DIAG server a real SAP GUI draws from, the family's first SAP-LZH *writer* accepted by a live kernel, and the dump-RCA loop closing on itself. 467 stars, and still only 5% explored.
 
-Previous: **[Agentic ABAP at 100 Stars](articles/2026-02-18-100-stars-celebration.md)**
+Earlier: **[Still Only 5%](articles/2026-08-25-still-five-percent.md)** · **[VSP Is Only 5% Explored](articles/2026-04-07-vsp-only-5-percent-explored.md)** · **[Agentic ABAP at 100 Stars](articles/2026-02-18-100-stars-celebration.md)**
 
-## What's New — Analysis & Intelligence Sprint
+## What's New
 
-> **Sprint goal:** move from CRUD tool to ABAP intelligence platform. Package-level analysis, directional boundary crossings, side effect detection, transport correlation.
-
-The full version history is in [CHANGELOG.md](CHANGELOG.md).
+The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.57.0 — the dump's own why](https://github.com/oisee/vibing-steampunk/releases/tag/v2.57.0)**.
 
 ### Hyperfocused Mode — 1 Tool to Rule Them All (Recommended)
 
-**Recommended for most setups.** Single `SAP(action, target, params)` tool covers most of what the 147 individual tools do — gCTS, revision history and i18n still need `--mode expert`. The same tool is now registered in focused and expert too, so an agent in either can reach the `analyze` surface. Minimal token overhead, maximum capability.
+**Recommended for most setups.** Single `SAP(action, target, params)` tool covers most of what the 151 individual tools do — gCTS, revision history and i18n still need `--mode expert`. The same tool is now registered in focused and expert too, so an agent in either can reach the `analyze` surface. Minimal token overhead, maximum capability.
 
 ```
 SAP(action="read",   target="CLAS ZCL_TRAVEL")
@@ -508,7 +779,7 @@ SAP(action="create", target="DEVC", params={"name": "$ZOZIK", "description": "Ne
 SAP(action="help",   target="debug")
 ```
 
-| Metric | Focused (102 tools) | Expert (147 tools) | Hyperfocused (1 tool) |
+| Metric | Focused (100 tools) | Expert (151 tools) | Hyperfocused (1 tool) |
 |--------|-------------------:|-------------------:|----------------------:|
 | MCP schema tokens | ~14,000 | ~40,000 | **~200** |
 | Reduction | — | — | **99.5%** |
@@ -686,6 +957,10 @@ vsp adt debug                                    # the same REPL over stateful H
 vsp trace run ZFOO --call                        # SAT trace: the measured call tree
 vsp trace unit ZFOO --line 12 --values           # record a unit, statement by statement
 
+# MIME repository (SMW0) — binary objects, byte-exact
+vsp w3mi list 'ZDEMO%'
+vsp w3mi get ZDEMO_LOGO.PNG --abapgit-dir src/
+
 # Tables & search
 vsp query T000 --top 5                           # query any table
 vsp search "ZCL_*" --type CLAS --max 50          # object search
@@ -729,7 +1004,7 @@ See **[CLI Guide](docs/cli-guide.md)** for the complete reference with feature r
 | **API Surface** | `vsp api-surface` — Clean Core inventory: which standard APIs does your code use? |
 | **Graph Export** | 7 formats: mermaid, HTML, DOT (Graphviz), PlantUML, GraphML (Gephi), JSON, MD |
 | **Static Analysis** | `vsp analyze` — 13 lint rules in pure Go, no external dependencies |
-| **Hyperfocused Mode** | 1 universal SAP tool, **~200 tokens** vs ~40K for 147 tools |
+| **Hyperfocused Mode** | 1 universal SAP tool, **~200 tokens** vs ~40K for 151 tools |
 | **Context Compression** | Auto-compressed dependency contracts — 7–30x compression, built-in ABAP parser |
 | **Method-Level Surgery** | Read/edit individual methods — 95% token reduction vs full-class round-trips |
 | **ABAP LSP** | Built-in Language Server — real-time diagnostics, go-to-definition, context push |
@@ -871,6 +1146,25 @@ vsp -s a4h dumps --similar latest                  # the same bug, its siblings,
 vsp -s a4h dumps --explain latest --tolerance 10m  # stack + ranked log around it
 vsp -s a4h applog --program ZCL_ORDER_POST --top 20
 vsp -s a4h applog --user TESTUSER --since 2026-08-01
+vsp -s a4h applog --object ZDEMO_LOG --messages    # the messages too, decoded from BALDAT
+vsp -s a4h jobs list --since 2026-09-01 --status A  # what was cancelled, with steps and spools
+vsp -s a4h jobs log ZDEMO_NIGHTLY 22554500          # the job log, over XBP
+vsp -s a4h spool list --job ZDEMO_NIGHTLY           # what the job's steps printed
+vsp -s a4h spool read 27302                         # the list, decoded from TemSe
+vsp -s a4h spool export --since 2026-09-01 --out ./spool
+vsp -s a4h variants ZDEMO_NIGHTLY_RUN MONTH_END      # every field, its label, its value
+vsp -s a4h fmtest ZDEMO_CALCULATE_TAX                # SE37's saved test data
+vsp -s a4h docs read FU BAL_LOG_CREATE               # SE61 documentation as Markdown
+vsp -s a4h docs img "cleanup job"                    # where in the IMG, and which activity
+vsp -s a4h texts set ZDEMO_RUN P_DEVC="Package to scan"  # selection texts, a plan first
+vsp -s a4h description ZDEMO_RUN "What the report does"  # SE38's title, without touching the source
+vsp update                                           # the latest release, verified, in place of this binary
+
+# Cluster tables — what only IMPORT could read, decoded here
+vsp -s a4h cluster read INDX --where "relid = 'ZV'" --schema
+vsp -s a4h cluster read INDX --where "relid = 'ZD'" --layout ZDEMO_S_HEADER   # names from DD03L
+vsp -s a4h cluster read STXL --where "tdname = 'ZDEMO_TEXT'"                 # SAPscript text
+vsp cluster decode baldat.txt --layout applog     # an SE16H export, offline
 
 # Testing & code quality
 vsp -s a4h test CLAS ZCL_MY_CLASS                 # run unit tests
@@ -1043,7 +1337,7 @@ recovery down with it.
 vsp --url https://host:44300 --user admin --password secret
 vsp --url https://host:44300 --cookie-file cookies.txt
 vsp --url https://host:44300 --sso --sso-system dev   # browser SSO, self-refreshing
-vsp --mode expert          # Enable all 147 tools
+vsp --mode expert          # Enable all 151 tools
 vsp --mode hyperfocused    # Single SAP tool (~200 tokens instead of ~40K)
 ```
 
@@ -1053,7 +1347,32 @@ export SAP_URL=https://host:44300
 export SAP_USER=developer
 export SAP_PASSWORD=secret
 export SAP_CLIENT=001
+export VSP_CACHE=true              # keep read answers; see "Response cache"
+export VSP_CACHE_PATH=.vsp-cache/dev.db
+export VSP_CACHE_TTL=10m
 ```
+
+### Response cache
+
+`VSP_CACHE=true` (or `"cache": true` on a system in `.vsp.json`) keeps the
+answers to reads: every GET, and data preview queries on the tables that
+change with development rather than with business — DD03L, TADIR, CROSS,
+T100, the documentation tables. Kept for `VSP_CACHE_TTL` (10 minutes) and
+dropped, all of it, on any write through the client, so an edit is never
+followed by a stale read. Queries on logs, spool and jobs are never kept.
+
+In memory by default, which is what an MCP session wants: the same class is
+read once, not on every turn. With `VSP_CACHE_PATH` (the CLI's default is
+`.vsp-cache/default.db`) it lives on SQLite and the next run starts warm:
+
+```
+vsp -v slim '$ZDEMO'      # 3.7 s, 28 requests
+vsp -v slim '$ZDEMO'      # 0.01 s — [cache] 28 hits, 0 misses
+```
+
+`-v` prints the counters at the end, and `SAP()` shows them on the MCP side.
+Something changed on the system by someone else within the TTL is the one
+case the cache cannot see; delete the file, or wait it out.
 
 ### .env File
 ```bash
@@ -1216,7 +1535,7 @@ One axis, three values — `--mode` or `SAP_MODE`:
 
 ```mermaid
 graph LR
-    F["focused<br/>102 tools<br/>~14K tokens"] --> E["expert<br/>147 tools<br/>~40K tokens"]
+    F["focused<br/>100 tools<br/>~14K tokens"] --> E["expert<br/>151 tools<br/>~40K tokens"]
     E --> H["hyperfocused<br/>1 tool<br/>~200 tokens<br/><i>recommended</i>"]
     style H fill:#2d6a4f,color:#fff,stroke:#4ade80,stroke-width:2px
     style F fill:#264653,color:#fff
@@ -1225,7 +1544,7 @@ graph LR
 
 | Aspect | Focused | Expert | Hyperfocused (recommended) |
 |--------|:-:|:-:|:-:|
-| **Tools** | 102 essential | 147 complete | 1 universal `SAP()` |
+| **Tools** | 100 essential | 151 complete | 1 universal `SAP()` |
 | **Schema tokens** | ~14K | ~40K | **~200** |
 | **How AI calls it** | `GetSource(type, name)` | Same, + granular tools | `SAP(action, target, params)` |
 | **Documentation** | In tool schemas | In tool schemas | `SAP(action="help")` |
@@ -1234,8 +1553,8 @@ graph LR
 
 ```bash
 vsp --mode hyperfocused  # recommended — single SAP(action, target, params) tool
-vsp --mode focused       # 102 curated tools (individual tool names)
-vsp --mode expert        # all 147 tools individually
+vsp --mode focused       # 100 curated tools (individual tool names)
+vsp --mode expert        # all 151 tools individually
 ```
 
 ## DSL & Automation
@@ -1451,7 +1770,7 @@ See [AI-Powered RCA Workflows](reports/2025-12-05-013-ai-powered-rca-workflows.m
 
 ## Tools Reference
 
-**Focused Mode Tools (102):**
+**Focused Mode Tools (100):**
 - **Search:** SearchObject, GrepObjects, GrepPackages
 - **Read:** GetSource, GetTable, GetTableContents, RunQuery, GetPackage, GetFunctionGroup, GetCDSDependencies
 - **Debugger:** DebuggerListen, DebuggerAttach, DebuggerDetach, DebuggerStep, DebuggerGetStack, DebuggerGetVariables, SetBreakpoint, GetBreakpoints, DeleteBreakpoint
@@ -1511,7 +1830,7 @@ See [README_TOOLS.md](README_TOOLS.md) for complete tool documentation.
 
 **vsp** is a Go rewrite with:
 - Single binary, zero dependencies
-- 147 tools (vs 13 original)
+- 151 tools (vs 13 original)
 - ~50x faster startup
 
 ## Optional: WebSocket Handler (ZADT_VSP)
@@ -1551,7 +1870,7 @@ See [WebSocket Handler Report](reports/2025-12-18-002-websocket-rfc-handler.md) 
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | Architecture diagrams (Mermaid) |
-| [README_TOOLS.md](README_TOOLS.md) | Complete tool reference (94 tools) |
+| [README_TOOLS.md](README_TOOLS.md) | Complete tool reference (151 tools) |
 | [MCP_USAGE.md](MCP_USAGE.md) | AI agent usage guide |
 | [docs/DSL.md](docs/DSL.md) | DSL & workflow documentation |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Technical architecture (detailed) |
@@ -1583,7 +1902,7 @@ make build          # Current platform
 make build-all      # All 9 platforms
 
 # Test
-go test ./...                              # Unit tests (1203)
+go test ./...                              # Unit tests (1354)
 go test -tags=integration -v ./pkg/adt/    # Integration tests (34+)
 ```
 
@@ -1611,8 +1930,8 @@ vibing-steampunk/
 
 | Metric | Value |
 |--------|-------|
-| **Tools** | 147 expert, 102 focused, 1 universal |
-| **Unit Tests** | 1203 (`go test ./... -list '.*'`; integration tests excluded by build tag) |
+| **Tools** | 151 expert, 100 focused, 1 universal |
+| **Unit Tests** | 1354 (`go test ./... -list '.*'`; integration tests excluded by build tag) |
 | **Platforms** | 9 (Linux, macOS, Windows × amd64/arm64/386) |
 
 <details>
@@ -1863,13 +2182,15 @@ engine a held session is the obvious next step and is not done yet.
 
 **Where we're going:** TAS-style debugging, time-travel, AI-powered RCA
 
-| Phase | Target | Features |
+| Phase | Status | Features |
 |-------|--------|----------|
-| 5 | Q1 2026 | Lua scripting ✅, variable history, checkpoints, Force Replay |
-| 6 | Q2 2026 | Test case extraction, ABAP test generator, mock framework |
-| 7 | Q3 2026 | Isolated playground with mocks, patch & re-run |
-| 8 | Q4 2026 | Time-travel debugging, temporal queries |
-| 9+ | 2027 | AI-suggested breakpoints, multi-agent debugging, self-healing |
+| 5 | ✅ shipped | Lua scripting, variable history, checkpoints, Force Replay |
+| 6 | partial | Test-case extraction — the recording format is here (`vsp trace unit`), grouping recorded calls into scenarios and generating ABAP Unit is not |
+| 7 | planned | Isolated playground with mocks, patch & re-run |
+| 8 | planned | Time-travel debugging, temporal queries |
+| 9+ | horizon | AI-suggested breakpoints, multi-agent debugging, self-healing |
+
+*Note: the 2026 debugger track landed differently than this list first imagined — the whole ADT-native debugger (breakpoints, stepping, variables, over RFC **and** plain HTTPS, nothing installed), AMDP debugging, and the dump-RCA post-mortem all shipped and are covered above. Phases 6+ are the test-extraction/replay branch of the vision.*
 
 **Read more:**
 - [VISION.md](VISION.md) - The dream: AI as a senior developer

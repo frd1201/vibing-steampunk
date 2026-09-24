@@ -25,17 +25,43 @@ func httpTraceEnabled() bool {
 
 const httpTraceBodyLimit = 4096
 
+var (
+	traceOutMu sync.Mutex
+	traceOut   io.Writer
+)
+
+// traceWriter returns where HTTP trace lines go: the file named by
+// VSP_TRACE_LOG (appended, created on first use), otherwise stderr. An MCP
+// server's stderr is rarely visible, so the file is what makes the trace
+// readable there.
+func traceWriter() io.Writer {
+	traceOutMu.Lock()
+	defer traceOutMu.Unlock()
+	if traceOut != nil {
+		return traceOut
+	}
+	if path := strings.TrimSpace(os.Getenv("VSP_TRACE_LOG")); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			traceOut = f
+			return traceOut
+		}
+	}
+	traceOut = os.Stderr
+	return traceOut
+}
+
 func traceHTTPRequest(req *http.Request, body []byte) {
 	if !httpTraceEnabled() {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\n>>> HTTP %s %s\n", req.Method, req.URL.String())
+	w := traceWriter()
+	fmt.Fprintf(w, "\n>>> HTTP %s %s %s\n", time.Now().UTC().Format(time.RFC3339Nano), req.Method, req.URL.String())
 	for k, vs := range req.Header {
 		for _, v := range vs {
 			if strings.EqualFold(k, "Authorization") || strings.EqualFold(k, "Cookie") {
 				v = "[REDACTED]"
 			}
-			fmt.Fprintf(os.Stderr, ">>> %s: %s\n", k, v)
+			fmt.Fprintf(w, ">>> %s: %s\n", k, v)
 		}
 	}
 	if len(body) > 0 {
@@ -43,9 +69,9 @@ func traceHTTPRequest(req *http.Request, body []byte) {
 		if len(trunc) > httpTraceBodyLimit {
 			trunc = trunc[:httpTraceBodyLimit]
 		}
-		fmt.Fprintf(os.Stderr, ">>> body (%d bytes):\n%s\n", len(body), string(trunc))
+		fmt.Fprintf(w, ">>> body (%d bytes):\n%s\n", len(body), string(trunc))
 		if len(body) > httpTraceBodyLimit {
-			fmt.Fprintf(os.Stderr, ">>> ... (truncated)\n")
+			fmt.Fprintf(w, ">>> ... (truncated)\n")
 		}
 	}
 }
@@ -54,7 +80,8 @@ func traceHTTPResponse(resp *http.Response, body []byte) {
 	if !httpTraceEnabled() || resp == nil {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "<<< HTTP %d %s\n", resp.StatusCode, resp.Status)
+	w := traceWriter()
+	fmt.Fprintf(w, "<<< HTTP %d %s\n", resp.StatusCode, resp.Status)
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			if strings.EqualFold(k, "Set-Cookie") {
@@ -62,7 +89,7 @@ func traceHTTPResponse(resp *http.Response, body []byte) {
 					v = v[:i] + "=[REDACTED]"
 				}
 			}
-			fmt.Fprintf(os.Stderr, "<<< %s: %s\n", k, v)
+			fmt.Fprintf(w, "<<< %s: %s\n", k, v)
 		}
 	}
 	if len(body) > 0 {
@@ -70,12 +97,12 @@ func traceHTTPResponse(resp *http.Response, body []byte) {
 		if len(trunc) > httpTraceBodyLimit {
 			trunc = trunc[:httpTraceBodyLimit]
 		}
-		fmt.Fprintf(os.Stderr, "<<< body (%d bytes):\n%s\n", len(body), string(trunc))
+		fmt.Fprintf(w, "<<< body (%d bytes):\n%s\n", len(body), string(trunc))
 		if len(body) > httpTraceBodyLimit {
-			fmt.Fprintf(os.Stderr, "<<< ... (truncated)\n")
+			fmt.Fprintf(w, "<<< ... (truncated)\n")
 		}
 	}
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(w)
 }
 
 // HTTPDoer is an interface for executing HTTP requests.
@@ -89,6 +116,7 @@ type HTTPDoer interface {
 type Transport struct {
 	config     *Config
 	httpClient HTTPDoer
+	cache      *responseCache
 
 	// jar, if non-nil, points to the cookie jar of the underlying
 	// *http.Client. Used by clearSAPSessionCookies to drop stale
@@ -118,23 +146,22 @@ type Transport struct {
 
 // NewTransport creates a new Transport with the given configuration.
 func NewTransport(cfg *Config) *Transport {
-	hc := cfg.NewHTTPClient()
-	return &Transport{
-		config:     cfg,
-		httpClient: hc,
-		jar:        hc.Jar,
-	}
+	return NewTransportWithClient(cfg, cfg.NewHTTPClient())
 }
 
 // NewTransportWithClient creates a new Transport with a custom HTTP client.
 // This is useful for testing with mock HTTP clients.
 func NewTransportWithClient(cfg *Config, client HTTPDoer) *Transport {
+	applyProxyContextIDGuardEnv(cfg)
 	t := &Transport{
 		config:     cfg,
 		httpClient: client,
 	}
 	if hc, ok := client.(*http.Client); ok {
 		t.jar = hc.Jar
+	}
+	if cfg.Cache {
+		t.cache = newResponseCache(cfg.CacheStore, cfg.CacheTTL)
 	}
 	return t
 }
@@ -159,6 +186,23 @@ type RequestOptions struct {
 	// where the lock handle is bound to a specific server-side session.
 	// When set, X-sap-adt-sessiontype header is set to "stateful" for this request.
 	Stateful bool
+
+	// FreshContext asks for a brand-new stateful context for this request when
+	// Config.ProxyContextIDGuard is on. LOCK sets it: a lock→write→unlock chain
+	// that runs inside a context another chain already used — the proxy keeps
+	// injecting the same live context — writes its inactive version but the
+	// object never reaches the activation worklist, and the activation that
+	// follows is refused with activationExecuted="false" and no message. The
+	// empty "sap-contextid=" cookie makes SAP open a new context, and the proxy
+	// re-learns it from the response.
+	FreshContext bool
+
+	// ReleaseContext lets the proxy inject its stored stateful context into a
+	// stateless request when Config.ProxyContextIDGuard is on — the one case
+	// where the guard cookie is deliberately left off. A stateless request
+	// ends the context it arrives in, which is how a finished lock chain's
+	// context is retired instead of lingering until the session timeout.
+	ReleaseContext bool
 }
 
 // Response wraps an HTTP response with convenience methods.
@@ -168,7 +212,8 @@ type Response struct {
 	Body       []byte
 }
 
-// Request performs an HTTP request to the ADT API.
+// Request performs an HTTP request to the ADT API, through the response
+// cache when one is configured.
 func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptions) (*Response, error) {
 	if opts == nil {
 		opts = &RequestOptions{}
@@ -176,11 +221,45 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 	if opts.Method == "" {
 		opts.Method = http.MethodGet
 	}
+	if t.cache == nil {
+		return t.request(ctx, path, opts)
+	}
+	if !cacheable(path, opts) {
+		resp, err := t.request(ctx, path, opts)
+		if isModifyingMethod(opts.Method) && !strings.HasPrefix(path, "/sap/bc/adt/datapreview/") {
+			t.cache.invalidate()
+		}
+		return resp, err
+	}
+	key, err := t.buildURL(path, opts.Query, opts.OverrideLanguage)
+	if err != nil {
+		return nil, fmt.Errorf("building URL: %w", err)
+	}
+	key += "\x00" + opts.Method + "\x00" + opts.Accept + "\x00" + fmt.Sprint(opts.Headers) + "\x00" + string(opts.Body)
+	if resp, ok := t.cache.get(key); ok {
+		return resp, nil
+	}
+	resp, err := t.request(ctx, path, opts)
+	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		t.cache.put(key, resp)
+	}
+	return resp, err
+}
 
+func (t *Transport) request(ctx context.Context, path string, opts *RequestOptions) (*Response, error) {
 	// Build URL
 	reqURL, err := t.buildURL(path, opts.Query, opts.OverrideLanguage)
 	if err != nil {
 		return nil, fmt.Errorf("building URL: %w", err)
+	}
+	if LogOutput != nil {
+		detail := ""
+		if strings.HasPrefix(path, "/sap/bc/adt/datapreview/") {
+			if m := fromTable.FindStringSubmatch(string(opts.Body)); m != nil {
+				detail = "  FROM " + strings.ToUpper(m[1])
+			}
+		}
+		fmt.Fprintf(LogOutput, "[adt] %s %s%s\n", opts.Method, path, detail)
 	}
 
 	// Create request
@@ -221,6 +300,9 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 	// the cookies of the session it replaced is exactly the mismatch the server
 	// rejects as a CSRF failure.
 	t.addCookies(req)
+	// The proxy guard goes on after the cookies: it only steps in when no
+	// cookie of our own is on the request.
+	t.applyProxyContextIDGuard(req, opts)
 
 	// Execute request
 	traceHTTPRequest(req, opts.Body)
@@ -360,6 +442,7 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 	// above. The second copy that used to stand here tested only
 	// SessionStateful, so it never knew about SessionKeep; it could only ever
 	// re-set what setDefaultHeaders had already decided.
+	t.applyProxyContextIDGuard(req, opts)
 
 	traceHTTPRequest(req, opts.Body)
 	resp, err := t.httpClient.Do(req)
@@ -510,6 +593,17 @@ func (t *Transport) probeCSRFToken(ctx context.Context, method string, stateful 
 	// already fighting lock-handle errors.
 	if stateful || t.sessionTypeIsStateful() {
 		req.Header.Set("X-sap-adt-sessiontype", "stateful")
+	}
+
+	// Session-holding proxy chain: open a fresh stateful context with an
+	// empty contextid so the chain replaces its (possibly dead) stored
+	// context with the live one from this response. Verified against SAP
+	// BAS: HEAD + stateful + "Cookie: sap-contextid=" heals ICMENOSESSION
+	// for all follow-up requests; without the stateful header the chain
+	// keeps the dead one.
+	if t.config.ProxyContextIDGuard && !t.hasJarCookies(req) && req.Header.Get("Cookie") == "" {
+		req.Header.Set("X-sap-adt-sessiontype", "stateful")
+		req.Header.Set("Cookie", "sap-contextid=")
 	}
 
 	traceHTTPRequest(req, nil)
@@ -695,6 +789,94 @@ func (t *Transport) clearSAPSessionCookies() {
 	}
 	hc.Jar = fresh
 	t.jar = fresh
+}
+
+// applyProxyContextIDGuardEnv switches Config.ProxyContextIDGuard on when
+// SAP_PROXY_CONTEXTID_GUARD=true is set in the environment.
+func applyProxyContextIDGuardEnv(cfg *Config) {
+	if cfg == nil || cfg.ProxyContextIDGuard {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SAP_PROXY_CONTEXTID_GUARD")), "true") {
+		cfg.ProxyContextIDGuard = true
+	}
+}
+
+// hasJarCookies reports whether the cookie jar holds cookies for the
+// request URL (i.e. we talk to SAP directly and manage the session
+// ourselves). Behind a session-holding proxy chain the jar stays empty for
+// sap-contextid: the chain absorbs the live Set-Cookie and only deletion
+// cookies (which the jar does not keep) get through.
+func (t *Transport) hasJarCookies(req *http.Request) bool {
+	client, ok := t.httpClient.(*http.Client)
+	if !ok || client.Jar == nil || req.URL == nil {
+		return false
+	}
+	return len(client.Jar.Cookies(req.URL)) > 0
+}
+
+// applyProxyContextIDGuard sends an explicit empty "sap-contextid=" cookie
+// on stateless requests when Config.ProxyContextIDGuard is enabled and no
+// cookie (jar or user-provided) is present. The ICM honours the first
+// sap-contextid in the header, so the empty value wins over whatever the
+// session-holding chain appends, and the stateless request no longer ends
+// the stateful context the chain keeps — which would leave every following
+// request in ICMENOSESSION. Stateful requests are left alone so the chain
+// keeps injecting the live context that lock handles are bound to — except
+// when the request asks for a fresh context (RequestOptions.FreshContext),
+// where the same empty cookie makes SAP open a new one and the chain
+// re-learns it. RequestOptions.ReleaseContext leaves a stateless request
+// without the cookie on purpose, so the injected context is ended.
+func (t *Transport) applyProxyContextIDGuard(req *http.Request, opts *RequestOptions) {
+	if !t.config.ProxyContextIDGuard {
+		return
+	}
+	if req.Header.Get("Cookie") != "" || t.hasJarCookies(req) {
+		return
+	}
+	if opts != nil && opts.ReleaseContext {
+		return
+	}
+	if req.Header.Get("X-sap-adt-sessiontype") == "stateful" && (opts == nil || !opts.FreshContext) {
+		return
+	}
+	req.Header.Set("Cookie", "sap-contextid=")
+}
+
+// ReleaseProxyContext retires the stateful context a session-holding proxy
+// chain currently injects, once a lock chain is finished with it. Without
+// the guard there is nothing to retire and the call is a no-op. The request
+// is a cheap stateless HEAD that carries no guard cookie, so the chain
+// injects its stored context and SAP ends it (verified: SM04 shows no
+// lingering ADT sessions afterwards). Failures are ignored: an already-dead
+// context answers ICMENOSESSION, which is the state this call wants anyway,
+// and the next LOCK opens a fresh context regardless.
+func (t *Transport) ReleaseProxyContext(ctx context.Context) {
+	if !t.config.ProxyContextIDGuard {
+		return
+	}
+	reqURL, err := t.buildURL("/sap/bc/adt/core/discovery", nil)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
+	if err != nil {
+		return
+	}
+	if t.config.HasBasicAuth() {
+		req.SetBasicAuth(t.config.Username, t.config.Password)
+	}
+	t.addCookies(req)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("X-sap-adt-sessiontype", "stateless")
+	traceHTTPRequest(req, nil)
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	traceHTTPResponse(resp, nil)
 }
 
 // CSRF token accessors with mutex protection

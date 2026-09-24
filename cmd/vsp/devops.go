@@ -12,6 +12,7 @@ import (
 
 	embedded "github.com/oisee/vibing-steampunk/embedded/abap"
 	"github.com/oisee/vibing-steampunk/embedded/deps"
+	installer "github.com/oisee/vibing-steampunk/internal/install"
 	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/ctxcomp"
 	"github.com/oisee/vibing-steampunk/pkg/graph"
@@ -425,11 +426,21 @@ Examples:
 var transportListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List transport requests",
-	Long: `List transport requests for the current user.
+	Long: `List transport requests of a user: workbench and customizing, modifiable
+and released by default.
+
+The listing is read from GET /sap/bc/adt/cts/transportrequests with explicit
+requestType and requestStatus (without them the organizer answers with
+released requests only), falling back to the saved Transport Organizer
+search configuration and then to the E070/E07T tables. The source that
+answered is reported on stderr.
 
 Examples:
   vsp transport list
-  vsp transport list --user DEVELOPER`,
+  vsp transport list --user DEVELOPER
+  vsp transport list --status D                      # modifiable only
+  vsp transport list --source config                 # as Eclipse: saved search configuration
+  vsp transport list --status R --released-from 20260101 --released-to 20261231`,
 	RunE: runTransportList,
 }
 
@@ -556,7 +567,14 @@ func init() {
 	deployCmd.Flags().String("transport", "", "Transport request number")
 
 	// Transport list flags
-	transportListCmd.Flags().String("user", "", "Filter by user (default: current user, '*' for every user)")
+	transportListCmd.Flags().String("user", "", "Filter by user (default: current user, '*' for every user — source sql only)")
+	transportListCmd.Flags().String("type", "", "Request types: letters of K (workbench), W (customizing), T (transport of copies); default KWT")
+	transportListCmd.Flags().String("status", "", "Request statuses: letters of D (modifiable), R (released); default DR")
+	transportListCmd.Flags().String("released-from", "", "YYYYMMDD; with --released-to bounds the released requests (default: last 14 days)")
+	transportListCmd.Flags().String("released-to", "", "YYYYMMDD; see --released-from")
+	transportListCmd.Flags().String("source", "", "auto (default), params, config or sql; see 'vsp transport list --help'")
+	transportListCmd.Flags().String("config-uri", "", "Search configuration for --source config (default: the one saved for the user)")
+	transportListCmd.Flags().Bool("no-targets", false, "Do not group by transport target and CTS project")
 
 	// Install flags
 	installZadtVspCmd.Flags().String("package", "$ZADT_VSP", "Target package for ZADT_VSP objects")
@@ -3238,6 +3256,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if result.ObjectURL != "" {
 			fmt.Fprintf(os.Stderr, "URL: %s\n", result.ObjectURL)
 		}
+		if result.Transport != "" {
+			fmt.Fprintf(os.Stderr, "Transport: %s\n", result.Transport)
+		}
+		if result.TransportNote != "" {
+			fmt.Fprintf(os.Stderr, "  %s\n", result.TransportNote)
+		}
 		if result.Message != "" {
 			fmt.Fprintf(os.Stderr, "%s\n", result.Message)
 		}
@@ -3273,26 +3297,50 @@ func runTransportList(cmd *cobra.Command, args []string) error {
 	}
 
 	user, _ := cmd.Flags().GetString("user")
+	requestType, _ := cmd.Flags().GetString("type")
+	requestStatus, _ := cmd.Flags().GetString("status")
+	releasedFrom, _ := cmd.Flags().GetString("released-from")
+	releasedTo, _ := cmd.Flags().GetString("released-to")
+	source, _ := cmd.Flags().GetString("source")
+	configURI, _ := cmd.Flags().GetString("config-uri")
+	noTargets, _ := cmd.Flags().GetBool("no-targets")
 
 	ctx := context.Background()
-	transports, err := client.ListTransports(ctx, user)
+	res, err := client.QueryTransports(ctx, adt.TransportQuery{
+		User:            user,
+		RequestTypes:    requestType,
+		RequestStatuses: requestStatus,
+		ReleasedFrom:    releasedFrom,
+		ReleasedTo:      releasedTo,
+		Source:          source,
+		ConfigURI:       configURI,
+		Targets:         !noTargets,
+	})
 	if err != nil {
 		return fmt.Errorf("listing transports failed: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "source: %s; %s\n", res.Source, res.Query.Describe())
+	if res.ConfigURI != "" {
+		fmt.Fprintf(os.Stderr, "search configuration: %s\n", res.ConfigURI)
+	}
+	for _, n := range res.Notes {
+		fmt.Fprintf(os.Stderr, "note: %s\n", n)
+	}
 
+	transports := adt.FlattenTransports(res.Transports)
 	if len(transports) == 0 {
 		fmt.Println("No transport requests found.")
 		return nil
 	}
 
-	fmt.Printf("%-12s %-12s %-8s %-10s %s\n", "NUMBER", "OWNER", "STATUS", "TYPE", "DESCRIPTION")
-	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("%-12s %-12s %-8s %-10s %-11s %s\n", "NUMBER", "OWNER", "STATUS", "TYPE", "BUCKET", "DESCRIPTION")
+	fmt.Println(strings.Repeat("-", 92))
 	for _, t := range transports {
 		status := t.Status
 		if t.StatusText != "" {
 			status = t.StatusText
 		}
-		fmt.Printf("%-12s %-12s %-8s %-10s %s\n", t.Number, t.Owner, status, t.Type, t.Description)
+		fmt.Printf("%-12s %-12s %-8s %-10s %-11s %s\n", t.Number, t.Owner, status, t.Type, t.Bucket, t.Description)
 	}
 	fmt.Printf("\n%d transport(s)\n", len(transports))
 	return nil
@@ -3380,13 +3428,12 @@ func runInstallZadtVsp(cmd *cobra.Command, args []string) error {
 	// Check if package exists.
 	// GetPackage reads the nodestructure API and cannot distinguish
 	// "package does not exist" from "package exists but has no children",
-	// so we use the direct PackageExists probe here. If the probe itself
-	// errors (5xx, network), we fall through to the create path and let
-	// SAP's own error surface there.
+	// so we use the direct PackageExists probe here. An inconclusive probe
+	// must not be treated as absence, because that could turn a network or
+	// authorization failure into an unintended create attempt.
 	packageExists, err := client.PackageExists(ctx, packageName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  Package %s existence check failed: %v — will attempt create\n", packageName, err)
-		packageExists = false
+		return fmt.Errorf("failed to check package %s: %w", packageName, err)
 	}
 	if packageExists {
 		fmt.Fprintf(os.Stderr, "  Package %s exists\n", packageName)
@@ -3451,17 +3498,12 @@ func runInstallZadtVsp(cmd *cobra.Command, args []string) error {
 	}
 
 	// Phase 2: Create package if needed
-	if !packageExists {
-		fmt.Fprintf(os.Stderr, "Creating package %s...\n", packageName)
-		err := client.CreateObject(ctx, adt.CreateObjectOptions{
-			ObjectType:  adt.ObjectTypePackage,
-			Name:        packageName,
-			Description: "VSP WebSocket Handler",
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create package %s: %w", packageName, err)
-		}
-		fmt.Fprintf(os.Stderr, "  Package created\n\n")
+	created, err := installer.EnsurePackage(ctx, client, packageName, "VSP WebSocket Handler")
+	if err != nil {
+		return fmt.Errorf("failed to ensure package %s: %w", packageName, err)
+	}
+	if created {
+		fmt.Fprintf(os.Stderr, "Package %s created and verified\n\n", packageName)
 	} else {
 		fmt.Fprintf(os.Stderr, "Using existing package %s\n\n", packageName)
 	}
@@ -3488,14 +3530,8 @@ func runInstallZadtVsp(cmd *cobra.Command, args []string) error {
 			Description: obj.Description,
 			Mode:        adt.WriteModeUpsert,
 		}
-		res, err := client.WriteSource(ctx, obj.Type, obj.Name, obj.Source, opts)
-		if err != nil {
+		if _, err := installer.DeploySource(ctx, client, obj.Type, obj.Name, obj.Source, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
-			failed++
-			continue
-		}
-		if ok, msg := res.Deployed(); !ok {
-			fmt.Fprintf(os.Stderr, "FAILED: %s\n", msg)
 			failed++
 			continue
 		}
@@ -3509,6 +3545,7 @@ func runInstallZadtVsp(cmd *cobra.Command, args []string) error {
 	if failed > 0 {
 		fmt.Fprintf(os.Stderr, "DEPLOYMENT PARTIALLY FAILED\n")
 		fmt.Fprintf(os.Stderr, "Deployed: %d, Skipped: %d, Failed: %d\n\n", deployed, skipped, failed)
+		return fmt.Errorf("%d object(s) failed to deploy; post-deployment features were not declared ready", failed)
 	} else {
 		fmt.Fprintf(os.Stderr, "DEPLOYMENT COMPLETE\n")
 		fmt.Fprintf(os.Stderr, "Deployed: %d, Skipped: %d\n\n", deployed, skipped)
@@ -3528,9 +3565,6 @@ func runInstallZadtVsp(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "  abapGit export NOT available (install abapGit first)\n")
 	}
 
-	if failed > 0 {
-		return fmt.Errorf("%d object(s) failed to deploy", failed)
-	}
 	return nil
 }
 
@@ -3637,22 +3671,12 @@ func runInstallAbapGit(cmd *cobra.Command, args []string) error {
 	// a GetPackage-based check cannot distinguish "absent" from "present but
 	// empty" because nodestructure returns an empty tree in both cases.
 	fmt.Fprintf(os.Stderr, "Checking package %s...\n", packageName)
-	exists, pkgErr := client.PackageExists(ctx, packageName)
+	created, pkgErr := installer.EnsurePackage(ctx, client, packageName, fmt.Sprintf("abapGit %s edition", edition))
 	if pkgErr != nil {
-		fmt.Fprintf(os.Stderr, "  Package existence check failed: %v — will attempt create\n", pkgErr)
-		exists = false
+		return fmt.Errorf("failed to ensure package: %w", pkgErr)
 	}
-	if !exists {
-		fmt.Fprintf(os.Stderr, "Creating package %s...\n", packageName)
-		err = client.CreateObject(ctx, adt.CreateObjectOptions{
-			ObjectType:  adt.ObjectTypePackage,
-			Name:        packageName,
-			Description: fmt.Sprintf("abapGit %s edition", edition),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create package: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "  Package created\n")
+	if created {
+		fmt.Fprintf(os.Stderr, "  Package created and verified\n")
 	} else {
 		fmt.Fprintf(os.Stderr, "  Package exists\n")
 	}
@@ -3679,16 +3703,9 @@ func runInstallAbapGit(cmd *cobra.Command, args []string) error {
 			Description: desc,
 			Mode:        adt.WriteModeUpsert,
 		}
-		// Reading only err counted a syntax error, a failed activation or an
-		// unsupported type as a deployed object — see WriteSourceResult.Deployed.
-		res, err := client.WriteSource(ctx, obj.Type, obj.Name, obj.MainSource, wopts)
+		_, err := installer.DeploySource(ctx, client, obj.Type, obj.Name, obj.MainSource, wopts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
-			failCount++
-			continue
-		}
-		if ok, msg := res.Deployed(); !ok {
-			fmt.Fprintf(os.Stderr, "FAILED: %s\n", msg)
 			failCount++
 			continue
 		}
