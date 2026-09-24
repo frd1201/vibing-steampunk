@@ -27,7 +27,19 @@ type LockResult struct {
 // LockObject acquires an edit lock on an ABAP object.
 // objectURL is the ADT URL of the object (e.g., "/sap/bc/adt/programs/programs/ZTEST")
 // accessMode is typically "MODIFY" for editing
-func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string) (*LockResult, error) {
+//
+// corrNr is the transport request (or task) the edit goes under. ADT accepts
+// it on the LOCK request itself, as the ADT API documents, and on-premise
+// systems that bind the lock to a request expect it there rather than only on
+// the write that follows. Without it the request is sent exactly as before.
+//
+// It is variadic so that a call site without a transport stays valid as
+// written; only the first value is read.
+func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode string, corrNr ...string) (*LockResult, error) {
+	transport := ""
+	if len(corrNr) > 0 {
+		transport = corrNr[0]
+	}
 	// Safety check - only check for MODIFY locks, READ locks are safe
 	if accessMode == "" || accessMode == "MODIFY" {
 		if err := c.checkSafety(OpLock, "LockObject"); err != nil {
@@ -42,6 +54,9 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 	params := url.Values{}
 	params.Set("_action", "LOCK")
 	params.Set("accessMode", accessMode)
+	if transport != "" {
+		params.Set("corrNr", transport)
+	}
 
 	resp, err := c.transport.Request(ctx, objectURL, &RequestOptions{
 		Method:   http.MethodPost,
@@ -534,7 +549,7 @@ func (c *Client) cleanupPartialObject(ctx context.Context, objectURL, pkg, trans
 	// half-created object. If we cannot acquire a lock the cleanup
 	// stops here and we surface manual recovery steps; we never try
 	// to delete without a lock because that would 403 anyway.
-	lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY")
+	lock, lockErr := c.LockObject(ctx, objectURL, "MODIFY", transport)
 	if lockErr != nil {
 		pce.CleanupActions = append(pce.CleanupActions,
 			fmt.Sprintf("could not acquire lock for delete: %v", lockErr))
@@ -1377,7 +1392,7 @@ func (c *Client) CreateTable(ctx context.Context, opts CreateTableOptions) error
 	// the lock (issue #91).
 	ctx = withMutationPackageChecked(ctx, tableURL)
 
-	lock, err := c.LockObject(ctx, tableURL, "MODIFY")
+	lock, err := c.LockObject(ctx, tableURL, "MODIFY", opts.Transport)
 	if err != nil {
 		return fmt.Errorf("locking table: %w", err)
 	}
