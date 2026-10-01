@@ -47,6 +47,12 @@ func (c *Client) LockObject(ctx context.Context, objectURL string, accessMode st
 		}
 	}
 
+	// The transport goes out on the LOCK, so the transport policy is checked
+	// here, before SAP sees it, and not only in the write that follows.
+	if err := c.checkTransportableEdit(transport, "LockObject"); err != nil {
+		return nil, err
+	}
+
 	if accessMode == "" {
 		accessMode = "MODIFY"
 	}

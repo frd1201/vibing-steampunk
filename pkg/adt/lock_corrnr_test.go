@@ -179,3 +179,33 @@ func TestSetDescription_PlannedTransportGoesOnLock(t *testing.T) {
 		t.Errorf("write went under %q, want the planned TR-EXAMPLE", res.Transport)
 	}
 }
+
+// TestLockObject_RefusesADisallowedTransportBeforeTheLock: the transport goes
+// out on the LOCK, so the transport policy has to be checked before it, not
+// only in the write that follows.
+func TestLockObject_RefusesADisallowedTransportBeforeTheLock(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		safety func(*SafetyConfig)
+	}{
+		{"transportable edits disabled", func(s *SafetyConfig) { s.AllowTransportableEdits = false }},
+		{"transport not in the allowlist", func(s *SafetyConfig) {
+			s.AllowTransportableEdits = true
+			s.AllowedTransports = []string{"TR-ALLOWED*"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &lockQueryRecorder{respond: func(*http.Request) (int, string) { return http.StatusOK, lockHandleXML }}
+			safety := UnrestrictedSafetyConfig()
+			tc.safety(&safety)
+			cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithSafety(safety))
+			c := NewClientWithTransport(cfg, NewTransportWithClient(cfg, rec))
+			if _, err := c.LockObject(context.Background(), "/sap/bc/adt/oo/classes/zcl_demo", "MODIFY", "TR-EXAMPLE"); err == nil {
+				t.Error("LockObject accepted a transport the configuration disallows")
+			}
+			if len(rec.locks) != 0 {
+				t.Errorf("sent %d LOCK requests carrying a disallowed transport, want 0", len(rec.locks))
+			}
+		})
+	}
+}
