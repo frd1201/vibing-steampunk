@@ -474,5 +474,5 @@ func keepsSAPCredentials(base, target *url.URL) bool {
 	if !strings.EqualFold(base.Hostname(), target.Hostname()) {
 		return false
 	}
-	return !(strings.EqualFold(base.Scheme, "https") && !strings.EqualFold(target.Scheme, "https"))
+	return !strings.EqualFold(base.Scheme, "https") || strings.EqualFold(target.Scheme, "https")
 }
