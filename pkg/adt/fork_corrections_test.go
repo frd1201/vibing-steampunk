@@ -763,3 +763,127 @@ func TestWriteTextPool_PassesTransportToLock(t *testing.T) {
 	}
 	assertLockCarried(t, rec.locks, "TR-EXAMPLE")
 }
+
+func TestTransportChoice_LockCorrNr(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		plan     *TransportChoice
+		supplied string
+		want     string
+	}{
+		{"supplied wins over the plan", &TransportChoice{Transport: "TR-PLANNED"}, "TR-NAMED", "TR-NAMED"},
+		{"no plan, nothing supplied", nil, "", ""},
+		{"no plan, supplied", nil, "TR-NAMED", "TR-NAMED"},
+		{"plan chose a request", &TransportChoice{Transport: "TR-PLANNED"}, "", "TR-PLANNED"},
+		{"plan chose nothing", &TransportChoice{Reason: "left to SAP"}, "", ""},
+		{"plan failed to create one", &TransportChoice{Transport: "TR-PLANNED", Err: errTransportCreate}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.plan.lockCorrNr(tc.supplied); got != tc.want {
+				t.Errorf("lockCorrNr = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetDescription_PlannedTransportGoesOnLock pins the case the supplied-only
+// tests cannot: the caller names no request, the plan picks one, and the LOCK
+// must carry it — the write that follows uses the plan's request, so a bare
+// LOCK would bind the lock and the PUT to different ones.
+func TestSetDescription_PlannedTransportGoesOnLock(t *testing.T) {
+	const check = `<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>` +
+		`<OBJECTNAME>ZDEMO</OBJECTNAME><DEVCLASS>ZDEMO</DEVCLASS><RECORDING>X</RECORDING><REQUESTS><CTS_REQUEST><REQ_HEADER>` +
+		`<TRKORR>TR-EXAMPLE</TRKORR><TRSTATUS>D</TRSTATUS><AS4TEXT>feature</AS4TEXT></REQ_HEADER></CTS_REQUEST></REQUESTS></DATA></asx:values></asx:abap>`
+	rec := &lockQueryRecorder{respond: func(r *http.Request) (int, string) {
+		switch {
+		case r.URL.Query().Get("_action") == "LOCK":
+			return http.StatusOK, lockHandleXML
+		case strings.HasSuffix(r.URL.Path, "/cts/transportchecks"):
+			return http.StatusOK, check
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/programs/programs/zdemo"):
+			return http.StatusOK, `<program:abapProgram xmlns:adtcore="http://www.sap.com/adt/core" adtcore:description="Old"/>`
+		default:
+			return http.StatusOK, ""
+		}
+	}}
+
+	res, err := transportableEditClient(rec).SetDescription(context.Background(), "PROG", "ZDEMO", "", "New", "")
+	if err != nil {
+		t.Fatalf("SetDescription failed: %v", err)
+	}
+	assertLockCarried(t, rec.locks, "TR-EXAMPLE")
+	if res.Transport != "TR-EXAMPLE" {
+		t.Errorf("write went under %q, want the planned TR-EXAMPLE", res.Transport)
+	}
+}
+
+// TestCheckRedirect_DoesNotDowngradeScheme pins the half of the rule the host
+// comparison cannot see: a hop to the same host over plain http would send the
+// credentials and the CSRF token in clear text.
+func TestCheckRedirect_DoesNotDowngradeScheme(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		base    string
+		target  string
+		wantSet bool
+	}{
+		{"https to http on the same host drops them", "https://sapdev.example.com", "http://sapdev.example.com:8000/sap/bc/adt/x", false},
+		{"https to http on the same port drops them", "https://sapdev.example.com:44300", "http://sapdev.example.com:44300/x", false},
+		{"http to https on another port keeps them", "http://sapdev.example.com:8000", "https://sapdev.example.com:44300/sap/bc/adt/x", true},
+		{"http to http on the same host keeps them", "http://sapdev.example.com:8000", "http://sapdev.example.com:8001/x", true},
+		{"https to https on another port keeps them", "https://sapdev.example.com:44300", "https://sapdev.example.com:8443/x", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewConfig(tc.base, "TESTUSER", "secret").NewHTTPClient()
+			first, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.base+"/sap/bc/adt/discovery", nil)
+			first.SetBasicAuth("TESTUSER", "secret")
+			first.Header.Set("X-CSRF-Token", "tok")
+			first.Header.Set("X-sap-adt-sessiontype", "stateful")
+
+			next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.target, nil)
+			// What net/http's own copier has already done before CheckRedirect runs.
+			next.Header.Set("X-CSRF-Token", "tok")
+			next.Header.Set("X-sap-adt-sessiontype", "stateful")
+			if err := client.CheckRedirect(next, []*http.Request{first}); err != nil {
+				t.Fatalf("CheckRedirect: %v", err)
+			}
+			for _, h := range []string{"Authorization", "X-CSRF-Token", "X-sap-adt-sessiontype"} {
+				if got := next.Header.Get(h) != ""; got != tc.wantSet {
+					t.Errorf("%s set=%v, want %v", h, got, tc.wantSet)
+				}
+			}
+		})
+	}
+}
+
+func TestKeepsSAPCredentials(t *testing.T) {
+	parse := func(s string) *url.URL {
+		u, err := url.Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	for _, tc := range []struct {
+		name         string
+		base, target string
+		want         bool
+	}{
+		{"same origin", "https://sap.example.com", "https://sap.example.com/x", true},
+		{"case-folded host", "https://SAP.example.com", "https://sap.example.com/x", true},
+		{"explicit default port", "https://sap.example.com", "https://sap.example.com:443/x", true},
+		{"foreign host", "https://sap.example.com", "https://idp.example.org/x", false},
+		{"downgrade", "https://sap.example.com", "http://sap.example.com/x", false},
+		{"upgrade", "http://sap.example.com:8000", "https://sap.example.com:44300/x", true},
+		{"scheme-less BaseURL has no host", "sap.example.com", "https://sap.example.com/x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keepsSAPCredentials(parse(tc.base), parse(tc.target)); got != tc.want {
+				t.Errorf("keepsSAPCredentials(%s, %s) = %v, want %v", tc.base, tc.target, got, tc.want)
+			}
+		})
+	}
+	if keepsSAPCredentials(nil, parse("https://sap.example.com")) {
+		t.Error("nil base keeps credentials")
+	}
+}
