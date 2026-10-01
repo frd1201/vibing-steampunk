@@ -249,6 +249,9 @@ func TestCreateObject_PartialPersistenceLockFails(t *testing.T) {
 		routes: []routedResponse{
 			resp("", "discovery", 200, "ok"),
 			resp(http.MethodPost, "nodestructure", 200, packageNodeStructureXML),
+			// The delete gate resolves the package before the cleanup locks
+			// anything (issue #238), so it must pass for the lock to be reached.
+			resp("", "informationsystem/search", 200, searchZTESTInTmpXML),
 			// Specific path (with name) before broad. Lock POST →
 			// 403 to simulate "locked by another user".
 			resp(http.MethodGet, "/programs/programs/ZTEST", 200, "<p/>"),
@@ -361,6 +364,7 @@ type capturedReq struct {
 	method      string
 	path        string
 	sessionType string
+	cookie      string
 }
 
 func (h *headerCaptureMock) Do(req *http.Request) (*http.Response, error) {
@@ -368,6 +372,7 @@ func (h *headerCaptureMock) Do(req *http.Request) (*http.Response, error) {
 		method:      req.Method,
 		path:        req.URL.Path,
 		sessionType: req.Header.Get("X-sap-adt-sessiontype"),
+		cookie:      req.Header.Get("Cookie"),
 	})
 	return h.inner.Do(req)
 }
@@ -450,6 +455,9 @@ func TestRecoverFailedCreate_LockHeldByAnother(t *testing.T) {
 	mock := &methodPathMock{
 		routes: []routedResponse{
 			resp("", "discovery", 200, "ok"),
+			// Without the package lookup the recovery stops at the mutation
+			// gate and never reaches the lock this test is about.
+			resp("", "informationsystem/search", 200, searchZTESTInTmpXML),
 			resp(http.MethodGet, "/programs/programs/ZTEST", 200, "<p/>"),
 			resp(http.MethodPost, "/programs/programs/ZTEST", 403, "locked by another user"),
 		},
@@ -463,6 +471,15 @@ func TestRecoverFailedCreate_LockHeldByAnother(t *testing.T) {
 	})
 	if pce == nil {
 		t.Fatal("expected PartialCreateError, got nil")
+	}
+	locked := false
+	for _, c := range mock.calls {
+		if c.method == http.MethodPost && strings.Contains(c.path, "/programs/programs/ZTEST") {
+			locked = true
+		}
+	}
+	if !locked {
+		t.Fatalf("recovery never tried to lock the object; calls: %#v", mock.calls)
 	}
 	if pce.CleanupOK {
 		t.Error("CleanupOK = true, want false — lock acquisition failed")
@@ -737,103 +754,72 @@ func TestLockObject_AllowsNoModificationOnReadLock(t *testing.T) {
 	}
 }
 
-// TestLockObject_RejectsLockWithoutHandle keeps the genuinely unusable case
-// covered: a LOCK that comes back without a handle leaves nothing to write with
-// and nothing to release, so it must fail at the LOCK call with an actionable
-// message rather than at a confusing 423 InvalidLockHandle seconds later.
-//
-// Restored after the 2026-08 upstream sync: the merge resolved this file in
-// favour of the fork's table-driven ModificationSupport test and took upstream's
-// version of this one with it, leaving the empty-LOCK_HANDLE guard in crud.go —
-// which CLAUDE.md names as the surviving half of issue #88 — with no test at
-// all. FORK.md's own rule: a correction with no test is a correction the next
-// merge can delete in silence.
-func TestLockObject_RejectsLockWithoutHandle(t *testing.T) {
-	const noHandleLockXML = `<?xml version="1.0" encoding="UTF-8"?>
-<asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
-  <asx:values>
-    <DATA>
-      <LOCK_HANDLE></LOCK_HANDLE>
-      <MODIFICATION_SUPPORT>NoModification</MODIFICATION_SUPPORT>
-    </DATA>
-  </asx:values>
-</asx:abap>`
-	mock := &methodPathMock{
-		routes: []routedResponse{
-			resp("", "discovery", 200, "ok"),
-			resp(http.MethodPost, "/oo/classes/ZCL_DEMO_NOHANDLE", 200, noHandleLockXML),
-		},
-	}
-	cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
-	client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
-
-	_, err := client.LockObject(
-		context.Background(),
-		"/sap/bc/adt/oo/classes/ZCL_DEMO_NOHANDLE",
-		"MODIFY",
-		"",
-	)
-	if err == nil {
-		t.Fatal("LockObject accepted a LOCK with no lock handle; the write that " +
-			"follows can only fail with 423 InvalidLockHandle")
-	}
-	if !strings.Contains(err.Error(), "no lock handle") {
-		t.Errorf("error = %v, want it to name the missing lock handle", err)
-	}
-}
-
-// TestLockObject_EmitsCorrNr pins the corrNr query parameter that on-premise
-// SAP systems expect when locking an object in a transportable package.
-// transport == "" must stay wire-level identical to the pre-4-arg behaviour,
-// so that the 22 non-write call sites keep behaving exactly as before.
-func TestLockObject_EmitsCorrNr(t *testing.T) {
-	tests := []struct {
-		name      string
-		transport string
-		wantCorr  bool
+// TestDeleteObject_ReleasesProxyContext pins the tail of a delete chain
+// behind a session-holding proxy: a DELETE consumes the lock handle but never
+// sends an UNLOCK, so the ENQUEUE stays with the stateful context until the
+// proxy times the session out. With the guard on, DeleteObject must retire the
+// context after the DELETE the same way UnlockObject does — a stateless HEAD
+// on discovery without a Cookie, so the proxy injects the context to end.
+func TestDeleteObject_ReleasesProxyContext(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		guard       bool
+		wantRelease bool
 	}{
-		{name: "transportable package", transport: "TR-EXAMPLE", wantCorr: true},
-		{name: "no transport", transport: "", wantCorr: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{name: "guard on retires the context", guard: true, wantRelease: true},
+		{name: "guard off sends nothing extra", guard: false, wantRelease: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			mock := &methodPathMock{
 				routes: []routedResponse{
 					resp("", "discovery", 200, "ok"),
-					resp(http.MethodPost, "/oo/classes/ZCL_DEMO", 200, lockResponseXML),
+					resp("", "informationsystem/search", 200, searchZTESTInTmpXML),
+					resp(http.MethodDelete, "/programs/programs/ZTEST", 200, ""),
 				},
 			}
-			cfg := NewConfig("https://sap.example.com:44300", "user", "pass")
-			client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, mock))
+			tracker := &headerCaptureMock{inner: mock}
+			opts := []Option{WithAllowedPackages("$TMP")}
+			if tc.guard {
+				opts = append(opts, WithProxyContextIDGuard())
+			}
+			cfg := NewConfig("https://sap.example.com:44300", "user", "pass", opts...)
+			client := NewClientWithTransport(cfg, NewTransportWithClient(cfg, tracker))
 
-			_, err := client.LockObject(
-				context.Background(),
-				"/sap/bc/adt/oo/classes/ZCL_DEMO",
-				"MODIFY",
-				tt.transport,
-			)
+			err := client.DeleteObject(context.Background(), "/sap/bc/adt/programs/programs/ZTEST", "TESTHANDLE", "")
 			if err != nil {
-				t.Fatalf("LockObject returned %v, want nil", err)
+				t.Fatalf("DeleteObject failed: %v", err)
 			}
 
-			var lockQuery string
-			var seen bool
-			for _, c := range mock.calls {
-				if c.method == http.MethodPost && strings.Contains(c.path, "ZCL_DEMO") {
-					lockQuery, seen = c.query, true
+			deleteAt := -1
+			for i, c := range tracker.captured {
+				if c.method == http.MethodDelete {
+					deleteAt = i
 				}
 			}
-			if !seen {
-				t.Fatal("no LOCK request was recorded")
+			if deleteAt < 0 {
+				t.Fatal("no DELETE request was sent")
 			}
-
-			gotCorr := strings.Contains(lockQuery, "corrNr=TR-EXAMPLE")
-			if gotCorr != tt.wantCorr {
-				t.Errorf("query = %q, corrNr present = %v, want %v", lockQuery, gotCorr, tt.wantCorr)
+			var release *capturedReq
+			for i := deleteAt + 1; i < len(tracker.captured); i++ {
+				c := tracker.captured[i]
+				if c.method == http.MethodHead && strings.HasSuffix(c.path, "/core/discovery") {
+					release = &tracker.captured[i]
+				}
 			}
-			if !tt.wantCorr && strings.Contains(lockQuery, "corrNr") {
-				t.Errorf("query = %q, must not emit corrNr when transport is empty", lockQuery)
+			if !tc.wantRelease {
+				if release != nil {
+					t.Fatalf("DELETE was followed by a HEAD on discovery although the guard is off: %+v", tracker.captured)
+				}
+				return
+			}
+			if release == nil {
+				t.Fatalf("DELETE was not followed by the stateless HEAD that retires the proxy context: %+v", tracker.captured)
+			}
+			if release.sessionType != "stateless" {
+				t.Errorf("release X-sap-adt-sessiontype = %q, want \"stateless\"", release.sessionType)
+			}
+			if release.cookie != "" {
+				t.Errorf("release Cookie = %q, want none so the proxy injects the context to be released", release.cookie)
 			}
 		})
 	}

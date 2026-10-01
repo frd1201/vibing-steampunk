@@ -422,6 +422,16 @@ func (s *Server) handleInstallZADTVSP(ctx context.Context, request mcp.CallToolR
 		deployed = append(deployed, obj.Name)
 	}
 
+	// The transport service's push channel. Without it uploads still work;
+	// their outcome is read with transport_status.
+	fmt.Fprintf(&sb, "  AMC %s (transport push) ", embedded.AMCApplicationName)
+	if err := s.adtClient.UpsertAMCApplication(ctx, embedded.AMCApplicationName, embedded.AMCApplicationDescription,
+		packageName, embedded.AMCApplicationDefinition); err != nil {
+		fmt.Fprintf(&sb, "– not set up (%v); upload outcomes are read with transport_status\n", err)
+	} else {
+		sb.WriteString("✓ Deployed\n")
+	}
+
 	sb.WriteString("\n")
 
 	// Summary
@@ -557,6 +567,15 @@ func (s *Server) handleInstallAbapGit(ctx context.Context, request mcp.CallToolR
 		sb.WriteString("Alternative: Download from GitHub:\n")
 		sb.WriteString("  https://github.com/abapGit/abapGit\n")
 		return mcp.NewToolResultText(sb.String()), nil
+	}
+
+	// An install writes objects into the system. The deployment below is not
+	// implemented yet, so this sends nothing today; the check is here so that
+	// the day it is, a read-only server refuses before the first request.
+	if !checkOnly {
+		if err := s.adtClient.Safety().CheckOperation(adt.OpCreate, "InstallAbapGit"); err != nil {
+			return newToolResultError(err.Error() + " (check_only=true reports without installing)"), nil
+		}
 	}
 
 	// Temporarily allow the install target package to bypass SAP_ALLOWED_PACKAGES restrictions.

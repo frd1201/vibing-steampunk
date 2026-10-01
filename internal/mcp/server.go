@@ -37,9 +37,11 @@ type Server struct {
 	adtClient     *adt.Client
 	amdpWSClient  *adt.AMDPWebSocketClient  // WebSocket-based AMDP client (ZADT_VSP)
 	debugWSClient *adt.DebugWebSocketClient // WebSocket-based debug client (ZADT_VSP)
-	config        *Config                   // Server configuration for session manager creation
-	featureProber *adt.FeatureProber        // Feature detection system (safety network)
-	featureConfig adt.FeatureConfig         // Feature configuration
+	// transportWS, when set, replaces ZADT_VSP's transport domain (tests).
+	transportWS   func(ctx context.Context) (adt.TransportService, error)
+	config        *Config            // Server configuration for session manager creation
+	featureProber *adt.FeatureProber // Feature detection system (safety network)
+	featureConfig adt.FeatureConfig  // Feature configuration
 
 	// Shared classic-RFC client (lazily dialled, reused across tool calls, and
 	// pinged while idle so a gateway timeout does not kill it)
@@ -100,6 +102,8 @@ type Config struct {
 	AllowedTransports       []string // Whitelist specific transports (supports wildcards like "A4HK*")
 	AllowTransportableEdits bool     // Allow editing objects that require transport requests
 	TransportChoice         string   // auto (default): pick a request for a write that names none; off: leave it to SAP
+	CTSProject              string   // CTS project a request vsp creates is filed under
+	TransportTarget         string   // transport target of a request vsp creates
 
 	// Feature configuration (safety network)
 	// Values: "auto" (default, probe system), "on" (force enabled), "off" (force disabled)
@@ -115,6 +119,10 @@ type Config struct {
 
 	// Session type: "stateful" keeps SAP session across requests (required for lock/write flows)
 	SessionType string
+	// SystemName is this server's system in .vsp.json (-s / SAP_SYSTEM). Empty
+	// finds it by URL and client; its per-system settings (the RFC gateway and
+	// credentials) apply to this server only.
+	SystemName string
 
 	// Debugger configuration
 	TerminalID string // SAP GUI terminal ID for cross-tool breakpoint sharing
@@ -122,6 +130,11 @@ type Config struct {
 	// ReauthFunc is called on 401 to re-authenticate (e.g., re-run SAML dance).
 	// Returns fresh cookies. Passed through to adt.Config.
 	ReauthFunc func(ctx context.Context) (map[string]string, error)
+
+	// ReauthReadOnly limits the re-auth function to unlocked GET/HEAD reads.
+	// Set for credential sources another process refreshes (--cookie-file):
+	// writes and lock windows must fail instead of replaying on a new session.
+	ReauthReadOnly bool
 
 	// ReauthTimeout caps one re-authentication attempt. Zero uses the client
 	// default, which assumes the flow runs unattended; a browser sign-in that
@@ -169,6 +182,9 @@ func NewServer(cfg *Config) *Server {
 	}
 	if cfg.ReauthFunc != nil {
 		opts = append(opts, adt.WithReauthFunc(cfg.ReauthFunc))
+		if cfg.ReauthReadOnly {
+			opts = append(opts, adt.WithReadOnlyReauth())
+		}
 	}
 	if cfg.ReauthTimeout > 0 {
 		opts = append(opts, adt.WithReauthTimeout(cfg.ReauthTimeout))
@@ -207,6 +223,12 @@ func NewServer(cfg *Config) *Server {
 		safety.TransportChoice = cfg.TransportChoice
 	}
 	opts = append(opts, adt.WithSafety(safety))
+	if cfg.CTSProject != "" {
+		opts = append(opts, adt.WithCTSProject(cfg.CTSProject))
+	}
+	if cfg.TransportTarget != "" {
+		opts = append(opts, adt.WithTransportTarget(cfg.TransportTarget))
+	}
 
 	// VSP_CACHE=true keeps GET answers for VSP_CACHE_TTL (10m by default),
 	// in memory for the life of the server; VSP_CACHE_PATH puts them on

@@ -11,7 +11,10 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 // httpTraceEnabled reports whether the VSP_HTTP_TRACE env var requests raw
@@ -142,6 +145,22 @@ type Transport struct {
 	// from triggering simultaneous SAML dances.
 	reauthMu   sync.Mutex
 	lastReauth time.Time
+
+	// locks is the owning client's lock window. While it holds a handle,
+	// stateless requests are kept out of the stateful context (see do).
+	locks *lockWindow
+
+	// contextGate admits one request at a time into the stateful context, and
+	// keeps a stateless request that is allowed to end the context from
+	// racing one that is using it. contextInFlight counts the stateful
+	// requests under way or waiting (see do). Set by NewTransportWithClient.
+	contextGate     contextGate
+	contextInFlight atomic.Int32
+
+	// lockOutstanding, when set by the owning Client, reports whether that
+	// client holds a lock handle. Cookie-file recovery is refused while it
+	// does: reloading would replace the session the lock belongs to.
+	lockOutstanding func() bool
 }
 
 // NewTransport creates a new Transport with the given configuration.
@@ -154,8 +173,9 @@ func NewTransport(cfg *Config) *Transport {
 func NewTransportWithClient(cfg *Config, client HTTPDoer) *Transport {
 	applyProxyContextIDGuardEnv(cfg)
 	t := &Transport{
-		config:     cfg,
-		httpClient: client,
+		config:      cfg,
+		httpClient:  client,
+		contextGate: newContextGate(),
 	}
 	if hc, ok := client.(*http.Client); ok {
 		t.jar = hc.Jar
@@ -287,8 +307,8 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 		if token == "" {
 			// Fetch CSRF token first, on the same kind of session the request
 			// itself will use (issue #91).
-			if tokenErr := t.fetchCSRFTokenFor(ctx, opts.Stateful); tokenErr != nil {
-				return nil, fmt.Errorf("fetching CSRF token: %w", tokenErr)
+			if err := t.fetchCSRFTokenWithReauth(ctx, !t.config.ReauthReadOnly, opts.Stateful); err != nil {
+				return nil, fmt.Errorf("fetching CSRF token: %w", err)
 			}
 			token = t.getCSRFToken()
 		}
@@ -306,7 +326,7 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 
 	// Execute request
 	traceHTTPRequest(req, opts.Body)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
@@ -324,6 +344,9 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 	// was in fact served by the identity provider. Nothing downstream would
 	// recognise the logon page it carries, so catch it here by origin.
 	if resp.StatusCode < 400 && t.canReauth() && t.redirectedAwayFromSAP(resp) {
+		if err := t.requireSafeReauth(opts, path, nil); err != nil {
+			return nil, err
+		}
 		t.setCSRFToken("")
 		t.setSessionID("")
 		if err := t.callReauthFunc(ctx); err != nil {
@@ -338,7 +361,7 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 		// the request's own session kind: for a stateful write it lands between
 		// the failed attempt and the retry, and an unmarked probe there retires
 		// the session the lock handle belongs to (issue #91).
-		if err := t.fetchCSRFTokenFor(ctx, opts.Stateful); err != nil {
+		if err := t.fetchCSRFTokenWithReauth(ctx, !t.config.ReauthReadOnly, opts.Stateful); err != nil {
 			return nil, fmt.Errorf("refreshing CSRF token: %w", err)
 		}
 
@@ -358,6 +381,9 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 
 		// Handle session timeout - refresh session and retry once
 		if apiErr.IsSessionExpired() {
+			if err := t.requireSafeReauth(opts, path, apiErr); err != nil {
+				return nil, err
+			}
 			// Clear cached CSRF token, session ID, AND the stale sap-contextid /
 			// SAP_SESSIONID cookies. Without dropping the jar entries SAP keeps
 			// routing the retry to the same dead context and replies
@@ -378,6 +404,9 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 		// This happens after idle periods when the SAP session expires.
 		// We preserve apiErr so the original path/body is not lost if re-auth itself fails.
 		if resp.StatusCode == http.StatusUnauthorized {
+			if err := t.requireSafeReauth(opts, path, apiErr); err != nil {
+				return nil, err
+			}
 			t.setCSRFToken("")
 			t.setSessionID("")
 
@@ -437,7 +466,7 @@ func (t *Transport) retryRequest(ctx context.Context, path string, opts *Request
 	t.applyProxyContextIDGuard(req, opts)
 
 	traceHTTPRequest(req, opts.Body)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing retry request: %w", err)
 	}
@@ -618,7 +647,7 @@ func (t *Transport) probeCSRFToken(ctx context.Context, method string, stateful 
 	}
 
 	traceHTTPRequest(req, nil)
-	resp, err := t.httpClient.Do(req)
+	resp, err := t.do(req)
 	if err != nil {
 		return "", 0, false, fmt.Errorf("executing request: %w", err)
 	}
@@ -650,6 +679,41 @@ func (t *Transport) redirectedAwayFromSAP(resp *http.Response) bool {
 // by to produce one.
 func (t *Transport) canReauth() bool {
 	return !t.config.HasBasicAuth() && t.config.ReauthFunc != nil
+}
+
+// requireSafeReauth keeps externally refreshed cookie files out of writes and
+// lock windows. The request already left the process, so continuing it with a
+// new session would turn an observable failure into an unprovable outcome.
+// The session kind is the one the request was sent with: a client-wide
+// stateful session makes every request stateful (see the session header in
+// setDefaultHeaders), not only those that ask for it. cause, when not nil, is
+// the server's answer that showed the session gone; the refusal wraps it.
+func (t *Transport) requireSafeReauth(opts *RequestOptions, path string, cause error) error {
+	if !t.config.ReauthReadOnly {
+		return nil
+	}
+	method := http.MethodGet
+	if opts != nil && opts.Method != "" {
+		method = opts.Method
+	}
+	if t.lockOutstanding != nil && t.lockOutstanding() {
+		return refusal(cause, "session expired on %s %s: refusing cookie-file recovery while a lock is open, because reloading would replace the session the lock belongs to; "+
+			"retry after the lock is released (unlock the object, or wait for the SAP session timeout), or restart the server", method, path)
+	}
+	stateful := t.config.SessionType == SessionStateful || (opts != nil && opts.Stateful)
+	if opts != nil && !stateful && (opts.Method == http.MethodGet || opts.Method == http.MethodHead) {
+		return nil
+	}
+	return refusal(cause, "session expired on %s %s: refusing cookie-file recovery and replay because the remote result is unknown", method, path)
+}
+
+// refusal formats a recovery refusal, wrapping cause when there is one.
+func refusal(cause error, format string, args ...any) error {
+	msg := fmt.Sprintf(format, args...)
+	if cause == nil {
+		return errors.New(msg)
+	}
+	return fmt.Errorf("%s: %w", msg, cause)
 }
 
 // isCSRFToken reports whether the header value is an actual token rather than the
@@ -763,9 +827,8 @@ func (t *Transport) extractSessionID(resp *http.Response) string {
 	return ""
 }
 
-// clearSAPSessionCookies replaces the cookie jar with a fresh one to
-// drop every stale sap-contextid / SAP_SESSIONID entry the server set
-// during the now-expired stateful context.
+// clearSAPSessionCookies drops every stale sap-contextid / SAP_SESSIONID entry
+// the server set during the now-expired stateful context.
 //
 // Long-running MCP-server processes hit this after the first
 // Lock→Write→Unlock→Activate cycle: the stateless Activate call ends
@@ -776,30 +839,19 @@ func (t *Transport) extractSessionID(resp *http.Response) string {
 // IsSessionExpired recovery path relies on. Short-lived CLI
 // subcommands don't see the bug because each spawns a fresh process.
 //
-// Earlier attempts to delete targeted cookies via SetCookies with
-// MaxAge=-1 failed in practice because Go's http.CookieJar keys each
-// entry by (name, domain, path) and does not expose the stored path
-// through its public interface: SAP's ICM sets sap-contextid with
-// paths like /sap/, /sap/bc/, or /sap/bc/adt/, and an expire cookie
-// for Path="/" leaves those entries untouched. Replacing the jar
-// entirely removes every path variant in a single step.
+// Deleting targeted cookies via SetCookies with MaxAge=-1 does not work: Go's
+// http.CookieJar keys each entry by (name, domain, path) and does not expose the
+// stored path, and SAP's ICM sets sap-contextid under /sap/, /sap/bc/ and
+// /sap/bc/adt/. Emptying the whole jar removes every path variant at once.
 //
-// User-provided cookies (config.Cookies, e.g. SAML/SSO session
-// cookies from browser-auth) are attached per request via addCookies()
-// on each outbound Request, so the jar swap does not lose them — only
-// cookies that the server had dynamically deposited during the dead
-// session are dropped, which is exactly the desired behaviour.
+// User-provided cookies (config.Cookies, e.g. SAML/SSO session cookies from
+// browser-auth) are attached per request via addCookies(), so they survive —
+// only what the server deposited during the dead session is dropped.
+//
+// The jar is emptied in place through resetCookieJar; replacing client.Jar here
+// raced every concurrent Do (FORK.md known issue 2, fixed by upstream #251).
 func (t *Transport) clearSAPSessionCookies() {
-	hc, ok := t.httpClient.(*http.Client)
-	if !ok {
-		return
-	}
-	fresh := newCookieJar()
-	if fresh == nil {
-		return
-	}
-	hc.Jar = fresh
-	t.jar = fresh
+	t.resetCookieJar()
 }
 
 // applyProxyContextIDGuardEnv switches Config.ProxyContextIDGuard on when
@@ -881,7 +933,10 @@ func (t *Transport) ReleaseProxyContext(ctx context.Context) {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-sap-adt-sessiontype", "stateless")
 	traceHTTPRequest(req, nil)
-	resp, err := t.httpClient.Do(req)
+	// Through do, like every other request: while another chain holds a lock
+	// or a stateful request is under way, the release goes without the
+	// context id and leaves that chain's context alone.
+	resp, err := t.do(req)
 	if err != nil {
 		return
 	}
@@ -1033,14 +1088,25 @@ func (t *Transport) callReauthFunc(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(cookies) == 0 {
+		return fmt.Errorf("re-authentication returned no cookies")
+	}
 
+	// Make the accepted source snapshot the sole authentication state before
+	// asking SAP for a token. The callback has already validated its input; an
+	// error before this point leaves the old session untouched.
 	t.cookiesMu.Lock()
-	t.config.Cookies = cookies
+	t.config.Cookies = cloneCookies(cookies)
 	t.cookiesMu.Unlock()
+	t.setCSRFToken("")
+	t.setSessionID("")
 	// The jar still holds what the expired session's server set — including its
 	// own SAP_SESSIONID, which would ride along beside the new one and leave the
 	// server to pick between them.
-	t.clearSAPSessionCookies()
+	t.resetCookieJar()
+	if t.cache != nil {
+		t.cache.invalidate()
+	}
 
 	// Fetch CSRF token with the new cookies.
 	// Set lastReauth only after CSRF succeeds — if it fails, the next
@@ -1091,6 +1157,69 @@ func (t *Transport) adoptServerCookies(resp *http.Response) {
 	}
 }
 
+// resetCookieJar discards cookies accumulated under a previous session.
+//
+// The client built by Config.NewHTTPClient keeps one resettableJar for its
+// lifetime, and clearing it is safe while other requests are under way.
+// Assigning client.Jar instead would race every concurrent Do, which reads
+// the field; that fallback is left only for a caller-supplied client with a
+// jar of its own.
+func (t *Transport) resetCookieJar() {
+	client, ok := t.httpClient.(*http.Client)
+	if !ok || client.Jar == nil {
+		return
+	}
+	if jar, ok := client.Jar.(*resettableJar); ok {
+		jar.reset()
+		return
+	}
+	// A caller-supplied client with a jar of its own: swap it, but never for a
+	// bare cookiejar.New — that would drop the Secure-stripping wrapper.
+	if fresh := newCookieJar(); fresh != nil {
+		client.Jar = fresh
+		t.jar = fresh
+	}
+}
+
+// resettableJar is an http.CookieJar that can be emptied while in use. The
+// http.Client holds the same resettableJar throughout; reset swaps the jar
+// inside it under a lock.
+type resettableJar struct {
+	mu    sync.RWMutex
+	inner http.CookieJar
+}
+
+// newResettableJar builds the jar for the client's lifetime. Its inner jar comes
+// from newCookieJar, not cookiejar.New: the Secure-stripping wrapper must
+// survive both construction and every reset, or plain-HTTP systems behind a
+// reverse proxy lose their session (pinned by fork_corrections_test.go).
+func newResettableJar() *resettableJar {
+	return &resettableJar{inner: newCookieJar()}
+}
+
+func (j *resettableJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.mu.RLock()
+	inner := j.inner
+	j.mu.RUnlock()
+	inner.SetCookies(u, cookies)
+}
+
+func (j *resettableJar) Cookies(u *url.URL) []*http.Cookie {
+	j.mu.RLock()
+	inner := j.inner
+	j.mu.RUnlock()
+	return inner.Cookies(u)
+}
+
+// reset drops every cookie. A request that took the old jar just before
+// reset may still set its response cookies there; they are discarded with it.
+func (j *resettableJar) reset() {
+	jar := newCookieJar()
+	j.mu.Lock()
+	j.inner = jar
+	j.mu.Unlock()
+}
+
 // CurrentCookies returns a copy of the session this client is using now.
 //
 // The session is not the one it started with: an expiry replaces the whole map,
@@ -1116,7 +1245,18 @@ func (t *Transport) CurrentCookies() map[string]string {
 func (t *Transport) SetCookies(cookies map[string]string) {
 	t.cookiesMu.Lock()
 	defer t.cookiesMu.Unlock()
-	t.config.Cookies = cookies
+	t.config.Cookies = cloneCookies(cookies)
+}
+
+func cloneCookies(cookies map[string]string) map[string]string {
+	if len(cookies) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(cookies))
+	for name, value := range cookies {
+		cloned[name] = value
+	}
+	return cloned
 }
 
 // addCookies adds user-provided cookies to a request under cookiesMu read lock.
@@ -1127,3 +1267,139 @@ func (t *Transport) addCookies(req *http.Request) {
 		req.AddCookie(&http.Cookie{Name: name, Value: value})
 	}
 }
+
+// stripContextID removes a non-empty sap-contextid cookie from req.
+func stripContextID(req *http.Request) {
+	cookies := req.Cookies()
+	kept := cookies[:0]
+	stripped := false
+	for _, c := range cookies {
+		if c.Name == "sap-contextid" && c.Value != "" {
+			stripped = true
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if !stripped {
+		return
+	}
+	req.Header.Del("Cookie")
+	for _, c := range kept {
+		req.AddCookie(c)
+	}
+}
+
+// do sends a request, keeping concurrent callers of one client from breaking
+// each other's lock chains. Two things end or break the stateful ADT context a
+// lock handle is bound to, and both are the ordinary work of another caller --
+// a second agent sharing this client:
+//
+//   - A stateless request ends the context it arrives in, and the jar puts
+//     the context's sap-contextid on every request. One sent between LOCK and
+//     the write turns the write into 423 ExceptionResourceInvalidLockHandle.
+//     So while a lock is outstanding, or a stateful request is under way, a
+//     stateless request goes without the jar: it carries the session's other
+//     cookies but not sap-contextid, and the cookies its response sets are
+//     not learned. The stateful context is neither ended nor replaced.
+//   - The ICM serves a stateful context one request at a time and answers a
+//     second concurrent one with 400. The session recovery that follows drops
+//     the cookies and orphans the context together with the enqueue it holds,
+//     which then refuses every later LOCK on the object ("already editing")
+//     until the session times out. So requests into the context -- stateful
+//     ones, and unmarked ones such as the CSRF probe -- go one at a time.
+//     Chains still interleave: one context holds several locks.
+//
+// A stateless request outside any lock window still goes into the context and
+// ends it, as before -- that is how a finished chain's context is retired. It
+// holds the gate shared while it does, so a LOCK cannot open a window in the
+// context it is about to end; stateless requests still run side by side. A
+// stateless request never waits for the gate: when a request into the context
+// holds it or waits for it, the stateless one goes isolated at once. Requests
+// into the context wait their turn only as long as their own context lasts.
+func (t *Transport) do(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("X-sap-adt-sessiontype") == "stateless" {
+		if t.contextGate.tryShared() {
+			if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.present()) {
+				defer t.contextGate.releaseShared()
+				return t.httpClient.Do(req)
+			}
+			t.contextGate.releaseShared()
+		}
+		// Cookies supplied with the configuration (browser or SAML logon)
+		// were put on the request already, sap-contextid among them; it
+		// would end the context just the same. The empty one the proxy guard
+		// sends to switch the context off stays.
+		stripContextID(req)
+		client, ok := t.httpClient.(*http.Client)
+		if !ok || client.Jar == nil {
+			return t.httpClient.Do(req)
+		}
+		for _, c := range client.Jar.Cookies(req.URL) {
+			if c.Name != "sap-contextid" {
+				req.AddCookie(c)
+			}
+		}
+		isolated := *client
+		isolated.Jar = nil
+		return isolated.Do(req)
+	}
+
+	stateful := req.Header.Get("X-sap-adt-sessiontype") == "stateful"
+	if stateful {
+		t.contextInFlight.Add(1)
+		defer t.contextInFlight.Add(-1)
+	}
+	if err := t.contextGate.lock(req.Context()); err != nil {
+		return nil, &url.Error{Op: urlErrorOp(req.Method), URL: req.URL.String(), Err: err}
+	}
+	defer t.contextGate.unlock()
+	return t.httpClient.Do(req)
+}
+
+// urlErrorOp names the method the way net/http does in its *url.Error.
+func urlErrorOp(method string) string {
+	if method == "" {
+		return "Get"
+	}
+	return method[:1] + strings.ToLower(method[1:])
+}
+
+// contextGateSlots is the gate's weight: one slot per stateless request that
+// holds it shared, all of them for a request into the context. A million
+// concurrent stateless requests on one client is out of reach.
+const contextGateSlots = 1 << 20
+
+// contextGate is a readers-writer gate over a weighted semaphore. Readers
+// never wait: tryShared takes one slot with TryAcquire, which fails while a
+// writer holds the gate or is queued for it, so readers cannot starve a
+// writer. Writers take every slot with Acquire, which queues them in arrival
+// order and gives up with their context; a writer that gives up passes the
+// turn on to the next in the queue. The zero value is not usable; see
+// newContextGate.
+type contextGate struct {
+	sem *semaphore.Weighted
+}
+
+func newContextGate() contextGate {
+	return contextGate{sem: semaphore.NewWeighted(contextGateSlots)}
+}
+
+// tryShared takes the gate shared if no writer holds it or waits for it.
+func (g contextGate) tryShared() bool { return g.sem.TryAcquire(1) }
+
+func (g contextGate) releaseShared() { g.sem.Release(1) }
+
+// lock takes the gate exclusively, or gives up with ctx's error. A gate
+// handed over just as ctx ended is given back: the caller is not to go on.
+func (g contextGate) lock(ctx context.Context) error {
+	if err := g.sem.Acquire(ctx, contextGateSlots); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		g.sem.Release(contextGateSlots)
+		return err
+	}
+	return nil
+}
+
+func (g contextGate) unlock() { g.sem.Release(contextGateSlots) }
