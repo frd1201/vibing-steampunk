@@ -408,6 +408,17 @@ carries `transport` and, when the choice was made here, `transportNote`.
 `--transport-choice off` (or `SAP_TRANSPORT_CHOICE=off`) restores the old
 behaviour.
 
+**A request filed under a CTS project.** Systems that organise their requests
+in CTS projects expect each request to carry one. Where the project is
+mandatory, ADT refuses a request without it — *Change requests must be
+assigned to a project* — so vsp could not create a request there at all, and
+elsewhere it created one outside any project. `--cts-project` and `--transport-target`
+(`SAP_CTS_PROJECT`, `SAP_TRANSPORT_TARGET`, or `cts_project` /
+`transport_target` per system in `.vsp.json`) now apply to every request vsp
+creates, the automatic one above included; `create_transport` also takes
+`cts_project` and `target` per call. ADT's answer names the project by its
+external ID, not the name it stored — E070A (`SAP_CTS_PROJECT`) is the record.
+
 **Merging requests, moving an entry** is SE09's Utilities → Reorganize and
 nothing in ADT — the organizer's resources add objects and release, none
 removes an entry — and the function modules behind SE09 are not
@@ -420,9 +431,107 @@ SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport merge TR-A TR-B --into TR-C     
 SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport move "PROG ZDEMO_RUN" --from TR-A --to TR-B
 ```
 
-MCP: `system` with `merge_transports` (`source`, `target`) and
-`move_transport_object` (`object`, `from`, `to`). Both need ZADT_VSP on the
+Adding an entry nobody edits -- a `LIMU REPT` for a report's texts, a `TABU`
+with the keys of the customizing rows it carries -- and taking one out go the
+same way:
+
+```bash
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport add TR-A "LIMU REPT ZDEMO" "R3TR PROG ZDEMO2"
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport add TR-A "R3TR TABU ZDEMO_CONF" --key 100KEY1 --key "100KEY2*"
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport remove TR-A "PROG ZDEMO"
+```
+
+MCP: `system` with `merge_transports` (`source`, `target`),
+`move_transport_object` (`object`, `from`, `to`), `add_transport_object`
+(`transport`, `objects` or `object` + `keys`) and `remove_transport_object`
+(`transport`, `object`). All need ZADT_VSP on the
 system — redeploy it after this release, the bridge changed.
+
+**A transport of copies** of a request, the way SE01 builds one: the request is
+created over ADT (`tm:type` T, with a target), and its object list copied in
+with `TR_COPY_COMM` through the same bridge — from each task that holds
+objects while the request is modifiable, since the function copies only the
+entries of the request it is given, and from the request itself once it is
+released. The description defaults to `ToC ` and the original's. ADT takes a
+target without a client (`QAS`, not SE01's `QAS.100`), or a target group.
+Nothing is released unless asked:
+
+```bash
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport toc TR-A --target QAS
+SAP_ENABLE_TRANSPORTS=true vsp -s a4h transport toc TR-A --target /GROUP/ --release
+```
+
+MCP: `system` with `copy_to_toc` (`transport`, `target`, optional
+`description`, `cts_project`, `release`).
+
+Under `--allowed-packages`, every object the copy would carry is checked
+first (a LIMU entry by its class, interface or program; one whose object
+cannot be told, such as `LIMU FUNC`, is refused), and any offender refuses the
+whole copy before anything is created. Entries a modifiable request holds
+itself, outside its tasks, are not copied; they are listed under `skipped`.
+If a list fails to copy or the release fails, the result is an error that
+names the transport of copies, what was copied, what was not, and the
+release status. `--read-only` refuses it like any transport write.
+
+**Upload a transport** into the connected system's import queue -- and no
+further. A released request's cofile `K<nr>.<SID>` and data file
+`R<nr>.<SID>` are written into DIR_TRANS of the system vsp is connected to
+(`cofiles/`, `data/`), and the request is added to that system's import
+buffer, as STMS's *Extras > Other Requests > Add* does. vsp never imports:
+the import stays a human step in STMS.
+
+```bash
+SAP_ENABLE_TRANSPORTS=true vsp -s qassys transport upload --cofile ./K900123.DEV --datafile ./R900123.DEV   # waits up to --wait (60s) for the outcome
+SAP_ENABLE_TRANSPORTS=true vsp -s qassys transport status TR-EXAMPLE --job 12345678   # queued / pending / job_failed / unknown, read-only
+SAP_ENABLE_TRANSPORTS=true vsp -s qassys transport buffer TR-EXAMPLE      # read-only view of the queue
+SAP_ENABLE_TRANSPORTS=true vsp -s devsys transport download TR-EXAMPLE -o ./out   # copy out of DIR_TRANS; changes nothing, but refused under --read-only (data files can hold table contents)
+```
+
+MCP (expert mode only): `system` with `upload_transport` (`cofile_path` +
+`datafile_path`, or `cofile_name`/`cofile_base64` + `datafile_name`/`datafile_base64`),
+and the read-only `transport_status` (`transport`, `job`) and `transport_buffer`
+(optional `transport`).
+
+The upload answers as soon as the files are written and the background job
+that adds the request is released: status `pending` and the job's number.
+`transport_status` / `vsp transport status` then say `queued` only when the
+buffer file holds the request and the job is done, `pending` while it runs,
+`job_failed` when it ended without the request in the buffer, and `unknown`
+otherwise -- check STMS and the job in SM37 then. The job also pushes its
+outcome to the WebSocket that started the upload (AMC application
+`ZVSP_TRANSPORT`, channel `/buffer`, which `vsp install zadt-vsp` creates), so
+`vsp transport upload` learns it within a second or two instead of polling;
+the status call still decides, and without the AMC application the upload
+works the same, polling. An upload committed but
+never handed to a job (the session ends, or a new upload begins) has its files
+deleted again.
+
+A request whose SID is the connected system's own (exported from this very
+system) is uploaded like any other: putting a system's own released request
+back into its queue -- after its files were lost, say -- is a legitimate use,
+and the import, if any, is still a human decision in STMS.
+
+The rules, checked in vsp and again in ZADT_VSP's `ZCL_VSP_TRANSPORT_SERVICE`:
+both files, matching number and SID, the cofile's shape (a header and an
+export step from its SID), 50 MB together; the target is always the server's
+own system and client (a `system`, `client` or directory parameter is
+refused); a file that exists in DIR_TRANS is never overwritten, not even an
+empty one; a request already in the buffer is not added again; and the only
+tp command that can be sent is the literal `ADDTOBUFFER`, which a test over
+the ABAP source enforces. Refused under `--read-only` and
+`--transport-read-only`; needs `--enable-transports`; `--allowed-transports`
+applies to the request. On the system it needs ZADT_VSP (redeploy:
+`vsp install zadt-vsp`) and `S_CTS_ADMI` with `EPS1` (files) and `TADD`
+(buffer). tp is started over synchronous RFC, which a ZADT_VSP (APC) session
+may not do, so the add runs as background job `ZVSP_TRANSPORT_BUFFER` under
+the caller's user (`S_BTCH_JOB` to release it); vsp waits for its result.
+The add is recorded in tp's user log (`ULOG`), the TMS alert log and the
+cofile (a `<SID> <` step line) -- not in TPSTAT, which has no row for
+ADDTOBUFFER. `transport_buffer` / `vsp transport buffer` read the buffer file
+`DIR_TRANS/buffer/<SID>` directly (no tp, no job), so they stay available
+under `--read-only`. If the buffer add fails while the request is certainly not in the
+buffer, the two files this upload wrote are deleted again. Taking a request
+out of the queue again is done in STMS.
 
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's
@@ -604,7 +713,13 @@ The destination is derived from the system you already configured: host from the
 URL, system number from its port, gateway port `3300 + sysnr`. Override per system in
 `.vsp.json` (`rfc_host`, `rfc_sysnr`, `rfc_port`) or per command (`--rfc-host`,
 `--sysnr`, `--port`). RFC logon uses `rfc_user`/`rfc_password`, else `SAP_USER`/
-`SAP_PASSWORD`, else the system's own credentials.
+`SAP_PASSWORD`, else the system's own credentials. An MCP server takes the RFC
+settings of its own system (the one named by `-s`/`SAP_SYSTEM`, else the entry whose
+URL and client match its own; a named entry whose URL or client is not the server's
+is refused), and logs on with that entry's `rfc_user`/`rfc_password`,
+else its own credentials. `SAP_USER`/`SAP_PASSWORD` are used only by a server without
+credentials of its own (cookie or SSO logon), and only when `SAP_URL` and
+`SAP_CLIENT` name its system.
 
 In MCP it is one more action on the single `SAP` tool — the tool space stays as small
 as it was:
@@ -614,6 +729,7 @@ SAP(action="rfc", params={"op":"info"})
 SAP(action="rfc", target="Z_DOUBLE", params={"op":"call","args":{"N":21}})
 SAP(action="rfc", target="STFC_CONNECTION")      # describe (default with a target)
 SAP(action="rfc", target="T000", params={"op":"read_table","fields":["MANDT"],"top":5})
+SAP(action="rfc", target="ZREPORT", params={"op":"run","variant":"DEFAULT"})  # background job: spool + job log
 ```
 
 Types are handled end to end — scalars (incl. STRING/XSTRING, DATE/TIME, packed
@@ -774,6 +890,57 @@ Earlier: **[Still Only 5%](articles/2026-08-25-still-five-percent.md)** · **[VS
 ## What's New
 
 The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.57.0 — the dump's own why](https://github.com/oisee/vibing-steampunk/releases/tag/v2.57.0)**.
+
+### Unreleased — behaviour changes since v2.58.0
+
+**`--read-only` now also refuses**, each before anything reaches SAP:
+
+- transport writes (create, release, delete, merge, move, entry add/remove),
+  even with `--enable-transports`;
+- gCTS create, delete, clone, pull, commit and switch-branch;
+- code execution: `SAP(action="rfc")` `call`, `CallRFC` (`debug CALL_RFC`),
+  `RunReport` / `RunReportAsync`, and unit test and code coverage runs
+  (`RunUnitTests`, `GetCodeCoverage`) that include dangerous or critical tests
+  (`include_dangerous`). Ordinary runs still work;
+- object and system changes: `SetTextElements`, `MoveObject` (`edit MOVE`,
+  `debug MOVE`), publishing and unpublishing service bindings,
+  `SetPrettyPrinterSettings`, and every lock except a READ lock
+  (`LockObject`, `edit LOCK`);
+- debugger variable writes through the ADT client (`DebuggerSetVariableValue`).
+
+**The CLI honours `read_only` in `.vsp.json` and `SAP_READ_ONLY`** for
+`vsp rfc call`, `rfc run`, `rfc adt` with a method other than GET/HEAD/OPTIONS,
+`vsp trace run --call`, `vsp trace unit --call`, the Run button of
+`vsp debug ui`, `run` and `call` in the `vsp debug` REPL, `eset` and
+writing `adt` requests in the `vsp rfc debug` / `vsp adt debug` REPLs, and the
+`vsp lua` bindings that overwrite variables (`setVariable`, `injectCheckpoint`,
+`forceReplay`, `replayFromStep`).
+
+**`--block-free-sql`** (and `block_free_sql` / `SAP_BLOCK_FREE_SQL` on the
+CLI) refuses `rfc read_table` / `vsp rfc read-table` with a caller's WHERE.
+Reads without one, and `search`, are unchanged.
+
+**RFC goes only to the server's own system.** When `-s` / `SAP_SYSTEM` names a
+`.vsp.json` entry whose `url`/`client` differ from `SAP_URL`/`SAP_CLIENT`, the
+server warns at startup and refuses RFC use. An entry without a `url` (gateway
+only) still applies. A per-call `host`, `sysnr` or `port` on
+`SAP(action="rfc")` that differs from the server's own gateway is refused, so
+the configured RFC credentials never go to a caller-chosen destination.
+
+**Known gaps** (not gated by `--read-only` yet): setting and deleting
+breakpoints, debugger stepping, starting an AMDP debug session, arming and
+removing traces (`vsp trace run` without `--call`, `vsp trace rm`), and the
+per-call RFC `user` override, which can still try other users' logons with the
+configured password and so risks locking an account. The name mask of
+`rfc search` is not escaped. `vsp rfc adt POST` is checked as a workflow
+operation (`W`), while `vsp adt request` checks the same kind of request as an
+update (`U`). Both are refused under read-only, but they use different
+operation letters.
+
+**Build and transport:** `go.mod` pins `toolchain go1.26.8`. mcp-go v1.1.0
+answers 403 to a request from a loopback address that carries a non-loopback
+`Host` header (DNS-rebinding protection), so a reverse proxy on the same host
+must rewrite `Host` to reach vsp over HTTP.
 
 ### Hyperfocused Mode — 1 Tool to Rule Them All (Recommended)
 
@@ -1909,7 +2076,7 @@ Uses **ABAP SQL syntax**, not standard SQL:
 make build          # Current platform
 make build-all      # All 9 platforms
 
-# Test
+# Test (go.mod pins toolchain go1.26.8)
 go test ./...                              # Unit tests (1354)
 go test -tags=integration -v ./pkg/adt/    # Integration tests (34+)
 ```

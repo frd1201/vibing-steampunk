@@ -57,6 +57,14 @@ CLASS zcl_vsp_apc_handler IMPLEMENTATION.
     APPEND NEW zcl_vsp_amdp_service( ) TO gt_services.
     APPEND NEW zcl_vsp_git_service( ) TO gt_services.
     APPEND NEW zcl_vsp_report_service( ) TO gt_services.
+    " The transport service is optional: an administrator may deploy ZADT_VSP
+    " without it, and the handler must still activate and run.
+    DATA lo_service TYPE REF TO zif_vsp_service.
+    TRY.
+        CREATE OBJECT lo_service TYPE ('ZCL_VSP_TRANSPORT_SERVICE').
+        APPEND lo_service TO gt_services.
+      CATCH cx_sy_create_object_error ##NO_HANDLER.
+    ENDTRY.
   ENDMETHOD.
 
   METHOD if_apc_wsp_extension~on_start.
@@ -71,10 +79,33 @@ CLASS zcl_vsp_apc_handler IMPLEMENTATION.
     ENDTRY.
     mv_session_id = lv_uuid.
 
+    " Push: bind this WebSocket to its own extension of AMC channel
+    " ZVSP_TRANSPORT /buffer, on which the transport service's background
+    " job publishes the outcome of an add. Whatever goes wrong here -- the
+    " AMC application missing (an abapGit deploy, a failed install step) or
+    " anything else -- must not take the WebSocket down with it: the session
+    " goes on without push, and outcomes are read with the status call.
+    DATA(lv_push) = abap_false.
+    TRY.
+        i_context->get_binding_manager( )->bind_amc_message_consumer(
+          i_application_id       = 'ZVSP_TRANSPORT'
+          i_channel_id           = '/buffer'
+          i_channel_extension_id = CONV #( mv_session_id ) ).
+        lv_push = abap_true.
+      CATCH cx_root ##CATCH_ALL.
+        lv_push = abap_false.
+    ENDTRY.
+
+    DATA lt_domains TYPE string_table.
+    LOOP AT gt_services INTO DATA(lo_service).
+      APPEND |"{ lo_service->get_domain( ) }"| TO lt_domains.
+    ENDLOOP.
+
     DATA(lv_data) = zcl_vsp_utils=>json_obj( zcl_vsp_utils=>json_join( VALUE #(
       ( zcl_vsp_utils=>json_str( iv_key = 'session' iv_value = mv_session_id ) )
-      ( zcl_vsp_utils=>json_str( iv_key = 'version' iv_value = '2.3.0' ) )
-      ( |"domains":["rfc","debug","amdp","git","report"]| )
+      ( zcl_vsp_utils=>json_str( iv_key = 'version' iv_value = '2.4.0' ) )
+      ( |"domains":{ zcl_vsp_utils=>json_arr( zcl_vsp_utils=>json_join( lt_domains ) ) }| )
+      ( zcl_vsp_utils=>json_bool( iv_key = 'push' iv_value = lv_push ) )
     ) ) ).
 
     send_response( VALUE #(
@@ -124,12 +155,24 @@ CLASS zcl_vsp_apc_handler IMPLEMENTATION.
           DATA(lv_brace_start) = find( val = iv_text off = lv_params_start sub = '{' ).
           IF lv_brace_start >= 0.
             " Count braces to find the matching closing brace
+            " A brace inside a string value is not a brace: strings are
+            " skipped, escapes honoured, or a value such as "{" cut the
+            " params short and lost every key after it.
             DATA(lv_depth) = 0.
             DATA(lv_pos) = lv_brace_start.
             DATA(lv_len) = strlen( iv_text ).
+            DATA(lv_in_str) = abap_false.
             WHILE lv_pos < lv_len.
               DATA(lv_char) = iv_text+lv_pos(1).
-              IF lv_char = '{'.
+              IF lv_in_str = abap_true.
+                IF lv_char = '\'.
+                  lv_pos = lv_pos + 1.
+                ELSEIF lv_char = '"'.
+                  lv_in_str = abap_false.
+                ENDIF.
+              ELSEIF lv_char = '"'.
+                lv_in_str = abap_true.
+              ELSEIF lv_char = '{'.
                 lv_depth = lv_depth + 1.
               ELSEIF lv_char = '}'.
                 lv_depth = lv_depth - 1.

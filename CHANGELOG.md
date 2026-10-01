@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.58.2] - 2026-10-01
+Fork release on upstream **v2.58.0 + 46 commits** (upstream head `9789f00`, no
+new upstream tag yet). Four of our own pull requests come back from upstream in
+this sync: #256, #257, #258 and #259.
+
+### Own changes
+
+- **adt:** `WriteMessageClassTexts` (upstream #270) and `CreateStructure` (#272) take their lock without the transport. Both arrived calling the three-argument `LockObject`, which compiles against the variadic signature and silently drops corrNr; both now pass it, and `fork_corrections_test.go` pins each
+- **adt:** session recovery empties the cookie jar in place (upstream #251's `resettableJar`) instead of assigning `client.Jar`, which raced every concurrent request. The inner jar is built through `newCookieJar`, so the `Secure`-stripping wrapper survives construction and every reset; `clearSAPSessionCookies` delegates to `resetCookieJar`
+- **test:** our copies of the `CheckRedirect` tests and the corrNr helpers and tests are removed; upstream carries them verbatim since #256 and #257
+
+### Adopted from upstream
+
+- **Ours, merged upstream:** #256 corrNr on the LOCK request, #257 credentials and CSRF token stay on the SAP host across redirects, #258 `retryRequest` reads the session back, #259 `vsp update` follows the repository the binary was released from
+- **Transport:** #246 requests filed under a CTS project, #247 copy a request into a transport of copies, #248 release failures reported, #262 add and remove request entries, #296 upload a released transport to the import queue (Viktor Vostrikov, Alice V.)
+- **Objects:** #263 ENHO implementations, #270 message classes in a chosen language, #272 structures and append structures, #273 domains and data elements, #268 IDocs as WE02 shows them, #261 reports as background jobs from the SAP tool, #267 ANSI spellings in queries (Viktor Vostrikov)
+- **Read-only and safety:** #283 `--read-only` covers every writing path, #280 RFC refused under `--read-only`, #288 one read-only invariant over every tool with four bypasses fixed, #243 DeleteObject gated before the lock, #225 and #230 package access resolved before self-locking updates, #228 transportable-edit opt-in reaches the CLI (Alice V., Viktor Vostrikov, Kylin)
+- **Sessions and locks:** #251 concurrent callers of one client no longer break each other's locks, #229 cookie files reloaded only for safe recovery, #231 compensating unlock at three more sites, #217 proxy context retired after DELETE, #227 cleanup outcome kept after an execute failure (Viktor Vostrikov, Kylin, txape10, Dominik Miescher)
+- **Fixes:** #271 group activation, #274 namespaced function groups, #282 and #233 namespaced URL casing, #221 EDITSOURCE URL, #264 refused ABAP Unit is not a success, #265 `vsp examples` type codes, #249 and #244 RFC settings and table-typed EXPORTING, #290 RFC gateway documentation
+- **Build and CI:** #234 dependency bump (mcp-go v1.1.0, x/net, x/text), #245 ZADT_VSP sources generated from `src/` with a drift check, #278 #285 #286 CI split into one job per check with a PR report, `-race`, shuffled tests and a "fix proven" check, #287 fuzzing of the SAP decoders, #289 synctest instead of sleeps. The report workflow asks Copilot for a review once the tests pass
+
 ## [3.58.1] - 2026-09-25
 Fork release on upstream **v2.58.0** (upstream head `9886d27`), unchanged from
 3.58.0 except for the update source below.

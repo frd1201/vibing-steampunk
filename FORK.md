@@ -94,6 +94,17 @@ git switch main && git merge --no-ff sync/upstream-$(date +%Y-%m)
 git branch -d sync/upstream-$(date +%Y-%m)
 ```
 
+**`lint (advisory)` is red on every sync PR — and that is not a finding.**
+The job runs with `only-new-issues`, which measures against the PR's diff, and a
+sync PR's diff is all of upstream's. Every upstream file counts as "new". The job
+is `continue-on-error`; the gates are `build`, `vet` and `test`. To tell upstream's
+backlog from something we wrote, take each `file:line` from the job log and match
+it against `git diff -U0 upstream/main HEAD`: a hit is ours, no hit is upstream's
+and is **not** fixed here (that would diverge in every file and cost the next sync
+its conflicts). October 2026: 268 findings, none on a line that differs from
+upstream. It cannot be reproduced locally while the installed `golangci-lint` is
+built with an older Go than `go.mod` asks for.
+
 ---
 
 ## Workflow A — your own change
@@ -201,10 +212,11 @@ to avoid ever needing this.
 
 Keep these branches alive until the PR is closed.
 
-**As of 2026-09-24:** nothing from the previous round is open (all four closed by
-2026-09-02); three new PRs were opened the same day. Before opening, the three
-branch commits were rewritten with the same tree and parent: the originals
-carried AI co-author trailers and an AI author, which this repo's PRs must not.
+**As of 2026-10-01:** nothing is open. All four PRs of the September round
+(#256, #257, #258, #259) were merged upstream, and the October sync brought them
+back. Before opening, the three branch commits were rewritten with the same tree
+and parent: the originals carried AI co-author trailers and an AI author, which
+this repo's PRs must not.
 
 | PR | Branch | Subject | Status |
 |---|---|---|---|
@@ -212,19 +224,27 @@ carried AI co-author trailers and an AI author, which this repo's PRs must not.
 | ~~[#121](https://github.com/oisee/vibing-steampunk/pull/121)~~ | `feat/incl-write-support` | INCL (PROG/I) write support | **merged** upstream (`d8ee78c`), after 131 days open |
 | ~~[#126](https://github.com/oisee/vibing-steampunk/pull/126)~~ | `fix/search-type-filter-issue-119` | server-side search type filter | **merged** upstream (`598e37c`), after 123 days open |
 | ~~[#164](https://github.com/oisee/vibing-steampunk/pull/164)~~ | `fix/query-top-0-returns-100-rows` | `--top 0` / `all_rows` returns every row | **merged** upstream (`df4a186`) |
-| [#256](https://github.com/oisee/vibing-steampunk/pull/256) | `feat/corrnr-at-lock` (`9d720d7`) | corrNr on the LOCK request, variadic, incl. upstream's newer lock paths | back-fill of `4b80378` + `b615466` + `05f4bd1`, written fresh on `upstream/main` |
-| [#257](https://github.com/oisee/vibing-steampunk/pull/257) | `fix/redirect-credentials-off-host` (`6066173`) | `CheckRedirect` keeps credentials and CSRF token on the SAP host | back-fill of the `CheckRedirect` part of `b83b4fa` |
-| [#258](https://github.com/oisee/vibing-steampunk/pull/258) | `fix/retry-request-session-reconcile` (`88df7a3`) | `retryRequest` reads the session back | Workflow A — the fork has it as `7e9bce8` (merged via `2331f97`); the PR carries the rewritten `88df7a3`, same tree |
+| ~~[#256](https://github.com/oisee/vibing-steampunk/pull/256)~~ | `feat/corrnr-at-lock` (`9d720d7`) | corrNr on the LOCK request, variadic, incl. upstream's newer lock paths | **merged** upstream (`558ce8d`); back-fill of `4b80378` + `b615466` + `05f4bd1` |
+| ~~[#257](https://github.com/oisee/vibing-steampunk/pull/257)~~ | `fix/redirect-credentials-off-host` (`6066173`) | `CheckRedirect` keeps credentials and CSRF token on the SAP host | **merged** upstream (`f6b9418`); upstream has since added the scheme-downgrade rule (`keepsSAPCredentials`), which this fork now carries |
+| ~~[#258](https://github.com/oisee/vibing-steampunk/pull/258)~~ | `fix/retry-request-session-reconcile` (`88df7a3`) | `retryRequest` reads the session back | **merged** upstream (`c1c7cee`); the fork had it as `7e9bce8` |
+| ~~#259~~ | — | `vsp update` follows the repository the binary was released from | **merged** upstream (`9408bf1`); the fork shipped it in v3.58.1 as `d492337`, and the October merge produced no diff in `cmd/vsp/update*.go` |
 
 The four branches of the closed round are released: nothing upstream holds them
 (`b0f3110`, `59b401b`, `38e8b43`, `2e972de`). Deleted 2026-09-24. The close-if-unanswered dates (2027-04-23, 2027-05-01) are void.
 
+The September-round branches `feat/corrnr-at-lock`, `fix/redirect-credentials-off-host`
+and `fix/retry-request-session-reconcile` are released too, now that their PRs are
+merged. They may be deleted; nothing upstream holds them. **Not yet done** — that is
+a GitHub-side action.
+
 One thing the merges cost us: upstream's copies are the revisions as submitted,
 not the revisions on `main`. The September sync therefore brought a second,
 older `WriteInclude` and a duplicate `TestLockObject_RejectsLockWithoutHandle`
-back into the tree, both of which had to be dropped by hand. Expect that shape
-whenever one of our PRs lands after we have kept working on the branch's subject
-here.
+back into the tree, both of which had to be dropped by hand. The October sync
+did it again: the `CheckRedirect` tests, the corrNr helpers and three
+`*PassesTransportToLock` tests came back verbatim next to our copies, and our
+copies were dropped. Expect that shape whenever one of our PRs lands after we
+have kept working on the branch's subject here.
 
 ### Superseded by upstream
 
@@ -267,24 +287,23 @@ still stand and are the ones to watch.
 Close-if-unanswered dates: #121 on **2027-04-23**, #126 on **2027-05-01**.
 #120 is closed, see below.
 
-### Pending back-fill
+### Back-fill — done
 
-`4b80378` (corrNr at LOCK time) is **upstream-worthy** — it follows the SAP ADT
-API spec and helps anyone editing objects in transportable packages. It was
-developed on a fork-only branch before this operating model existed, so no PR
-exists.
+`4b80378` (corrNr at LOCK time) and `b615466` (the variadic signature) were
+offered as #256 and merged upstream (`558ce8d`). Upstream's `LockObject` is now
+variadic too, so a three-argument call from upstream compiles — and **silently
+drops the transport**. The October sync found two such sites that arrived with
+no corrNr: `WriteMessageClassTexts` and `CreateStructure`. Nothing flags this at
+build or merge time. After every sync, list the calls and check each against a
+transport in scope:
 
-The September sync raised the price of not doing it. `LockObject` had four
-parameters here and three upstream, so every upstream call site is written
-three-argument and each one arrives as a build break at the next merge — twice
-now, and the September occurrence (`pkg/adt/session_affinity_test.go`) merged
-without a conflict at all before failing to compile. `b615466` makes `corrNr`
-variadic, which makes both spellings valid and takes the recurrence to zero.
+```bash
+grep -rn 'LockObject(' --include=*.go pkg internal cmd | grep -v _test.go
+```
 
-**Back-fill `b615466` together with `4b80378`.** The variadic signature is the
-part upstream can accept without changing a single call site of their own, which
-makes it the version worth offering. Branch off `upstream/main`, cherry-pick
-both, open a PR.
+Remaining three-argument sites that are intentional: the temp-program cleanup in
+`workflows_execute.go`, `UpsertAMCApplication` (no transport parameter) and
+`handleDeployZip` (the handler takes none).
 
 ---
 
@@ -313,13 +332,17 @@ adopted yet.
 | [#182](https://github.com/oisee/vibing-steampunk/pull/182) | Augusto42 | write-safety result verification | **adopted** 2026-09-24 | `installer.DeploySource` supersedes our `WriteSourceResult.Deployed` (removed, `8164285`) |
 | [#208](https://github.com/oisee/vibing-steampunk/pull/208) | dme007 | transport organizer explicit filters | **adopted** 2026-09-24 | `TransportQuery.normalized` carries our empty-user default |
 | [#179](https://github.com/oisee/vibing-steampunk/pull/179) | oisee | CGO-free SQLite | **adopted** 2026-09-24 | ends the local cgo test baseline below |
+| [#251](https://github.com/oisee/vibing-steampunk/pull/251) | Viktor Vostrikov | concurrent callers of one client, resettable jar | **adopted in part** 2026-10-01 | its `resettableJar` is the fix for *Known issues* 2 and was taken. Its inner jar is a bare `cookiejar.New`, which drops the `httpCookieJar` Secure-stripping wrapper; ours builds it through `newCookieJar`, and `clearSAPSessionCookies` now delegates to `resetCookieJar` |
+| [#229](https://github.com/oisee/vibing-steampunk/pull/229) | Kylin | reload cookie files only for safe session recovery | **adopted** 2026-10-01 | `requireSafeReauth` sits next to our jar reset in the session-expiry path; both kept |
+| [#231](https://github.com/oisee/vibing-steampunk/pull/231) | txape10 | compensating unlock at three more sites | **adopted** 2026-10-01 | `failureCleanupContext` is theirs; our `ReleaseLock` and `joinMessage` stay beside it |
+| [#217](https://github.com/oisee/vibing-steampunk/pull/217) | Dominik Miescher | proxy context retired after DELETE | **adopted** 2026-10-01 | opt-in with the proxy guard from #209 |
+| [#243](https://github.com/oisee/vibing-steampunk/pull/243) | Viktor Vostrikov | DeleteObject gated before the lock | **adopted** 2026-10-01 | `PrepareDelete` mirrors `PrepareSourceUpdate` |
+| [#283](https://github.com/oisee/vibing-steampunk/pull/283), [#288](https://github.com/oisee/vibing-steampunk/pull/288) | Alice V. | `--read-only` covers every writing path; one invariant over every tool | **adopted** 2026-10-01 | no fork code in the area. `LockObject` under `--read-only` now refuses every mode but READ, so the "MODIFY" lock the fork's deploy handlers take is refused there too, as intended |
+| [#256](https://github.com/oisee/vibing-steampunk/pull/256), [#257](https://github.com/oisee/vibing-steampunk/pull/257), [#258](https://github.com/oisee/vibing-steampunk/pull/258), [#259](https://github.com/oisee/vibing-steampunk/pull/259) | frd1201 | our own four | **merged** upstream | came back as duplicates of our tests; ours were dropped, see *Our open upstream PRs* |
 
-Watched, possible collision: #231 (compensating unlock at three more sites —
-overlaps `15804c1`), #229 (cookie reload on session recovery — the
-`clearSAPSessionCookies` area), #251 (concurrent callers of one client — see
-*Known issues* 2), #217 (proxy context after DELETE), #243 (DeleteObject gate
-before the lock), #138 (InstallZADTVSP source deploy). #150 and #130 are
-settled by #214 and #213.
+Watched, possible collision: #138 (InstallZADTVSP source deploy). #231, #229,
+#251, #217 and #243 landed in the October sync and are decided above; #150 and
+#130 are settled by #214 and #213.
 
 ---
 
@@ -342,6 +365,7 @@ Deliberately not upstreamed. No PR is owed for these.
 |---|---|---|---|
 | `sync/upstream-2026-08` | `9b8789d` (2026-08-27) | 341 commits, 314 files, +52,440 | 13 conflicts. Upstream had independently built several of our fixes, so most resolutions were a choice between two implementations rather than a combination — upstream won wherever the effect was the same. Three defects would have merged in silently: a new upstream file calling the three-arg `LockObject` (broke `go build`), a duplicate jar-reset that discarded the `httpCookieJar` wrapper, and unreachable code that `go vet` rejects. |
 | `claude/admiring-ptolemy-r48db4` | `9886d27` (2026-09-24, v2.58.0 + 3) | 110 commits, 217 files, +23,513 | 13 conflicts, 35 hunks. `resetCookieJar` came back a third time, now in the ICMENOSESSION path (#207), and #210 brought a second `cookiejar.New`. Taking "theirs" in the two install loops compiles and counts every object twice. The variadic `LockObject` held — no build break — but five new lock sites arrived without corrNr, which nothing flagged; threaded in `05f4bd1`. |
+| `sync/upstream-2026-10` | `9789f00` (2026-10-01, v2.58.0 + 46) | 46 commits, 236 files, +32,305 | 17 conflicts, 36 hunks, about a third of them one pattern: our four-argument `LockObject` calls against upstream's `trPlan.lockCorrNr(...)`, taken theirs, which is nil-safe and equal to ours when no plan exists. Four of our own PRs (#256–#259) came back. Three traps: `resetCookieJar` returned a *fourth* time, now as upstream's `resettableJar` (#251) — good mechanism, bare inner jar, merged by building the inner jar through `newCookieJar`; two lock paths with no corrNr that compiled and merged clean (`WriteMessageClassTexts`, `CreateStructure`); and our own tests arriving verbatim a second time. `TestClearSAPSessionCookies_ReplacesJar` pinned the old "jar reference changes" contract and had to be inverted — the race it protected is the race #251 fixes. |
 | `sync/upstream-2026-09` | `8dd2ef8` (2026-09-02) | 50 commits, 48 files, +4,119 | 17 conflicts — more than the August sync on an eighth of the volume, because both trees had spent the week on the same defect. Upstream's issue #91 work supersedes most of our #88 work and was taken whole. Two traps: `resetCookieJar` would have deleted the `httpCookieJar` wrapper (the August trap, renamed), and a new upstream *test* file merged clean and then failed to compile against our four-argument `LockObject` — fixed at the root by `b615466`. Three of our own PRs landed upstream during the window and came back as duplicate definitions. |
 
 **What made this sync survivable** was writing the missing tests *first*. Eleven
@@ -350,17 +374,17 @@ criterion until `fork_corrections_test.go` existed in `pkg/adt/` and
 `internal/mcp/`. Do that again before the next large sync: a correction with no
 test is a correction the merge can delete in silence.
 
-## Known issues — found, not fixed
+## Known issues — found, fixed since
 
 Both came out of the post-merge review on 2026-08-28. Neither was introduced by
-the sync: they predate it here **and** exist in `upstream/main` unchanged, so
-each is a candidate for an upstream PR rather than a fork-only patch. Recorded
-here so the next person does not have to rediscover them.
+the sync: they predate it here **and** existed in `upstream/main` unchanged.
+Both are fixed now (1 by our #258, 2 by upstream #251). Kept as the record of
+why the code looks the way it does.
 
 ### 1. `retryRequest` does not reconcile the session it just renewed
 
-**Fixed in the fork 2026-09-24** (`7e9bce8`, merged in `2331f97`) and offered
-upstream as `fix/retry-request-session-reconcile`. The analysis below stays as
+**Fixed in the fork 2026-09-24** (`7e9bce8`, merged in `2331f97`), offered
+upstream as #258 and **merged there** (`c1c7cee`). The analysis below stays as
 the record of why.
 
 `pkg/adt/http.go:331`. `Request()` reads three things back off every response:
@@ -402,6 +426,14 @@ has a concrete recurring cost attached to it.
 
 ### 2. Unsynchronised jar swap on a shared `http.Client`
 
+**Fixed 2026-10-01** by upstream #251. The client keeps one `resettableJar` for
+its lifetime and `resetCookieJar` empties it under a lock; `clearSAPSessionCookies`
+delegates to it. Our merge builds the inner jar through `newCookieJar`, so the
+Secure-stripping wrapper survives (`TestSessionRecovery_PreservesSecureStrippingJar`).
+One swap is left: a caller-supplied `*http.Client` whose jar is not a
+`resettableJar` still gets `client.Jar` assigned. Nothing in this repo builds
+one outside tests. The analysis below is the original finding.
+
 `clearSAPSessionCookies` (`pkg/adt/http.go:641`) assigns `hc.Jar` while other
 goroutines may be inside `httpClient.Do` reading `c.Jar`. `cmd/vsp/fetchsources.go:93`
 fans several goroutines out over one `*adt.Client`, and the MCP server serves
@@ -432,16 +464,21 @@ Relevant when syncing after upstream merges #120 or #121.
 |---|---|---|
 | `a47b225` | `2ea6004` | `feat/incl-write-support` |
 | `886a9b2` | `59b401b` | `fix/csrf-head-fallback-and-session-type` |
-| `4b80378`, `b615466`, `05f4bd1` | `9d720d7` | `feat/corrnr-at-lock` |
-| `b83b4fa` (the `CheckRedirect` part) | `6066173` | `fix/redirect-credentials-off-host` |
-| `7e9bce8` | `88df7a3` | `fix/retry-request-session-reconcile` |
+| `4b80378`, `b615466`, `05f4bd1` | `9d720d7` | `feat/corrnr-at-lock` — upstream `558ce8d` |
+| `b83b4fa` (the `CheckRedirect` part) | `6066173` | `fix/redirect-credentials-off-host` — upstream `f6b9418` |
+| `7e9bce8` | `88df7a3` | `fix/retry-request-session-reconcile` — upstream `c1c7cee` |
+| `d492337` | — | `vsp update` repository — upstream `9408bf1` |
 
-When upstream merges `feat/corrnr-at-lock`, the next sync brings its tests back
-as duplicates of ours: `lockQueryRecorder`, `lockHandleXML`,
-`transportableEditClient`, `assertLockCarried` and the three `*PassesTransportToLock` /
-`SelfLockPassesTransport` tests exist in both `pkg/adt/lock_corrnr_test.go`
-(theirs) and `pkg/adt/fork_corrections_test.go` / `internal/mcp/fork_corrections_test.go`
-(ours). Drop ours then; the build will say which.
+That happened in the October sync, as predicted here: `lockQueryRecorder`,
+`lockHandleXML`, `transportableEditClient`, `assertLockCarried`, the
+`*PassesTransportToLock` tests for SetDescription and WriteTextPool, the
+`SelfLockPassesTransport` test and both `CheckRedirect` tests existed in
+upstream's `lock_corrnr_test.go`, `config_test.go` and `lock_scope_test.go` and
+in our `fork_corrections_test.go` files. Ours were dropped. What stays in ours is
+what upstream does not have: `TestWriteInclude_PassesTransportToLock` and the
+two added in October for `WriteMessageClassTexts` and `CreateStructure`. Those
+reuse upstream's helpers, so if upstream renames `lockQueryRecorder` the build
+says so.
 
 `6b2cece` (the parked `fork-only/onprem-edit-fixes` branch) was adopted **in
 part only**: its corrNr work became `4b80378`, its configurable
