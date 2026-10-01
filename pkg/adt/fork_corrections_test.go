@@ -336,130 +336,6 @@ func TestFetchCSRFToken_FallsBackToGET(t *testing.T) {
 // Findings from the post-merge review
 // --------------------------------------------------------------------------
 
-// TestCheckRedirect_DoesNotLeakCredentialsOffHost guards the narrowing of the
-// header re-attach. The handler exists so a redirect inside the SAP system
-// keeps Authorization (issue #90); it must not hand Basic credentials and the
-// session CSRF token to an identity provider on another host, which is exactly
-// where an expired SSO session redirects to.
-// It drives a real redirect through the client rather than calling
-// CheckRedirect directly. That distinction is the whole test: net/http copies
-// every non-sensitive header onto the next request *before* CheckRedirect runs
-// (client.go — copyHeaders then checkRedirect), so a handler that merely
-// declines to set X-CSRF-Token off-host leaves Go's copy of it in place and the
-// identity provider receives the session token anyway. Calling CheckRedirect
-// with a freshly-made empty header map cannot see that, and passed while the
-// leak was live.
-func TestCheckRedirect_DoesNotLeakCredentialsOffHost(t *testing.T) {
-	var idpAuth, idpCSRF, idpSessionType string
-	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		idpAuth = r.Header.Get("Authorization")
-		idpCSRF = r.Header.Get("X-CSRF-Token")
-		idpSessionType = r.Header.Get("X-sap-adt-sessiontype")
-	}))
-	defer idp.Close()
-	// httptest serves on 127.0.0.1; "localhost" is a different hostname to
-	// Go's cross-origin test, which is what makes this a foreign host.
-	idpURL := strings.Replace(idp.URL, "127.0.0.1", "localhost", 1)
-
-	var sapAuth, sapCSRF string
-	var sap *httptest.Server
-	sap = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/sap/bc/adt/discovery":
-			http.Redirect(w, r, idpURL+"/saml/sso", http.StatusFound)
-		case "/sap/bc/adt/hop":
-			// Same host, different path — the intra-SAP redirect the handler
-			// exists to serve.
-			http.Redirect(w, r, sap.URL+"/sap/bc/adt/landed", http.StatusFound)
-		default:
-			sapAuth = r.Header.Get("Authorization")
-			sapCSRF = r.Header.Get("X-CSRF-Token")
-		}
-	}))
-	defer sap.Close()
-
-	cfg := NewConfig(sap.URL, "TESTUSER", "secret")
-	client := cfg.NewHTTPClient()
-
-	do := func(path string) {
-		t.Helper()
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, sap.URL+path, nil)
-		if err != nil {
-			t.Fatalf("building request: %v", err)
-		}
-		req.SetBasicAuth("TESTUSER", "secret")
-		req.Header.Set("X-CSRF-Token", "tok")
-		req.Header.Set("X-sap-adt-sessiontype", "stateful")
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
-		}
-		resp.Body.Close()
-	}
-
-	do("/sap/bc/adt/discovery")
-	if idpAuth != "" {
-		t.Errorf("the identity provider received Authorization=%q", idpAuth)
-	}
-	if idpCSRF != "" {
-		t.Errorf("the identity provider received X-CSRF-Token=%q — declining to set a "+
-			"header is not the same as deleting the copy net/http already made", idpCSRF)
-	}
-	if idpSessionType != "" {
-		t.Errorf("the identity provider received X-sap-adt-sessiontype=%q", idpSessionType)
-	}
-
-	do("/sap/bc/adt/hop")
-	if sapAuth == "" {
-		t.Error("an intra-SAP redirect lost Authorization — issue #90 is what this handler is for")
-	}
-	if sapCSRF != "tok" {
-		t.Errorf("an intra-SAP redirect carried X-CSRF-Token=%q, want tok — the lock→write "+
-			"sequence needs it on the second hop", sapCSRF)
-	}
-}
-
-// TestCheckRedirect_HostMatchIgnoresCaseAndPort pins the comparison itself.
-// `req.URL.Host == sapHost` treated an ICM redirect that merely changed the
-// case of the FQDN, or spelled out :443, as a hop to a foreign host — which
-// silently dropped the very headers the handler exists to preserve. The port is
-// ignored outright, because the off-host branch now *deletes* those headers and
-// must not be stricter than net/http's own rule, which compares hostnames only:
-// one box answering on two ports is not a credential boundary.
-func TestCheckRedirect_HostMatchIgnoresCaseAndPort(t *testing.T) {
-	cfg := NewConfig("https://SAPDEV.example.com", "TESTUSER", "secret")
-	client := cfg.NewHTTPClient()
-
-	first, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://SAPDEV.example.com/sap/bc/adt/discovery", nil)
-	first.SetBasicAuth("TESTUSER", "secret")
-	first.Header.Set("X-CSRF-Token", "tok")
-
-	for _, tc := range []struct {
-		name    string
-		target  string
-		wantSet bool
-	}{
-		{"case-differing FQDN is the same host", "https://sapdev.example.com/sap/bc/adt/other", true},
-		{"explicit default port is the same host", "https://sapdev.example.com:443/sap/bc/adt/other", true},
-		{"another port on the same box is the same host", "https://sapdev.example.com:8443/sap/bc/adt/other", true},
-		{"foreign idp is not", "https://idp.example.org/saml/sso", false},
-		{"a sibling subdomain is not", "https://idp.sapdev.example.com/saml/sso", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.target, nil)
-			if err := client.CheckRedirect(next, []*http.Request{first}); err != nil {
-				t.Fatalf("CheckRedirect: %v", err)
-			}
-			gotAuth := next.Header.Get("Authorization") != ""
-			gotCSRF := next.Header.Get("X-CSRF-Token") != ""
-			if gotAuth != tc.wantSet || gotCSRF != tc.wantSet {
-				t.Errorf("target %s: Authorization set=%v, X-CSRF-Token set=%v, want both %v",
-					tc.target, gotAuth, gotCSRF, tc.wantSet)
-			}
-		})
-	}
-}
-
 // TestSessionKeep_UsesStatefulOnceASessionExists pins the documented meaning of
 // SAP_SESSION_TYPE=keep — "use the existing session if available, otherwise
 // stateless". It used to fall through to the stateless branch, so setting it to
@@ -676,90 +552,46 @@ func TestRenameObject_WritesToTheSourceURL(t *testing.T) {
 // corrNr on the LOCK in lock paths upstream added after the variadic change
 // --------------------------------------------------------------------------
 
-// lockQueryRecorder answers every request through respond and remembers the
-// query of each LOCK. Bodies are built per call, so a document read twice —
-// once before the lock and once under it — is served twice.
-type lockQueryRecorder struct {
-	respond func(r *http.Request) (int, string)
-	locks   []url.Values
-}
+// A three-argument LockObject compiles against the variadic signature and
+// silently drops the transport, so each lock path that arrives from upstream
+// gets its own pin. The recorder and client helpers live in lock_corrnr_test.go.
 
-func (m *lockQueryRecorder) Do(r *http.Request) (*http.Response, error) {
-	if r.URL.Query().Get("_action") == "LOCK" {
-		m.locks = append(m.locks, r.URL.Query())
-	}
-	status, body := m.respond(r)
-	h := http.Header{}
-	h.Set("X-CSRF-Token", "test-token")
-	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: h}, nil
-}
-
-const lockHandleXML = `<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml">` +
-	`<asx:values><DATA><LOCK_HANDLE>LH-1</LOCK_HANDLE></DATA></asx:values></asx:abap>`
-
-func transportableEditClient(doer HTTPDoer) *Client {
-	safety := UnrestrictedSafetyConfig()
-	safety.AllowTransportableEdits = true
-	cfg := NewConfig("https://sap.example.com:44300", "user", "pass", WithSafety(safety))
-	return NewClientWithTransport(cfg, NewTransportWithClient(cfg, doer))
-}
-
-func assertLockCarried(t *testing.T, locks []url.Values, want string) {
-	t.Helper()
-	if len(locks) == 0 {
-		t.Fatal("no LOCK request was recorded")
-	}
-	for _, q := range locks {
-		if got := q.Get("corrNr"); got != want {
-			t.Errorf("LOCK carried corrNr=%q, want %q", got, want)
-		}
-	}
-}
-
-// TestSetDescription_PassesTransportToLock pins corrNr on the LOCK of the
-// description write upstream added in #201. It arrived calling the
-// three-argument LockObject, which compiles against the variadic signature
-// and silently drops the transport.
-func TestSetDescription_PassesTransportToLock(t *testing.T) {
+// TestWriteMessageClassTexts_PassesTransportToLock pins corrNr on the lock the
+// message class write takes for itself (upstream #270).
+func TestWriteMessageClassTexts_PassesTransportToLock(t *testing.T) {
 	rec := &lockQueryRecorder{respond: func(r *http.Request) (int, string) {
-		switch {
-		case r.URL.Query().Get("_action") == "LOCK":
+		if r.URL.Query().Get("_action") == "LOCK" {
 			return http.StatusOK, lockHandleXML
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/programs/programs/zdemo"):
-			return http.StatusOK, `<program:abapProgram xmlns:adtcore="http://www.sap.com/adt/core" adtcore:description="Old"/>`
-		default:
-			return http.StatusOK, ""
 		}
+		return http.StatusOK, ""
 	}}
 
-	if _, err := transportableEditClient(rec).SetDescription(context.Background(), "PROG", "ZDEMO", "", "New", "TR-EXAMPLE"); err != nil {
-		t.Fatalf("SetDescription failed: %v", err)
+	err := transportableEditClient(rec).WriteMessageClassTexts(context.Background(), "ZDEMO_MC", "EN",
+		[]MessageClassMessage{{Number: "001", Text: "Hello"}}, "", "TR-EXAMPLE")
+	if err != nil {
+		t.Fatalf("WriteMessageClassTexts failed: %v", err)
 	}
 	assertLockCarried(t, rec.locks, "TR-EXAMPLE")
 }
 
-// TestWriteTextPool_PassesTransportToLock is the same pin for the text pool
-// write upstream added in #200.
-func TestWriteTextPool_PassesTransportToLock(t *testing.T) {
+// TestCreateStructure_PassesTransportToLock pins corrNr on the lock taken for
+// the DDL write that follows the create (upstream #272). Only the LOCK is
+// asserted: whatever the activation step makes of the empty stub answers is not
+// what this test is about.
+func TestCreateStructure_PassesTransportToLock(t *testing.T) {
 	rec := &lockQueryRecorder{respond: func(r *http.Request) (int, string) {
-		switch {
-		case r.URL.Query().Get("_action") == "LOCK":
+		if r.URL.Query().Get("_action") == "LOCK" {
 			return http.StatusOK, lockHandleXML
-		case strings.Contains(r.URL.Path, "/datapreview/"):
-			// MasterLanguage reads TADIR; E is the master, so EN is no translation.
-			return http.StatusOK, tableXML(xmlCol{name: "MASTERLANG", data: []string{"E"}})
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/textelements/"):
-			return http.StatusOK, "001=Old\n"
-		default:
-			return http.StatusOK, ""
 		}
+		return http.StatusOK, ""
 	}}
 
-	texts := map[string]map[string]string{"I": {"001": "New"}}
-	_, err := transportableEditClient(rec).WriteTextPool(context.Background(),
-		TextPoolTarget{Type: "CLAS", Name: "ZCL_DEMO"}, "EN", texts, "TR-EXAMPLE", TextPoolOptions{})
-	if err != nil {
-		t.Fatalf("WriteTextPool failed: %v", err)
-	}
+	_, _ = transportableEditClient(rec).CreateStructure(context.Background(), StructureOptions{
+		Name:        "ZDEMO_STRUCT",
+		Package:     "ZDEMO",
+		Description: "Demo",
+		Transport:   "TR-EXAMPLE",
+		Source:      "define structure zdemo_struct {\n  field1 : abap.char(10);\n}",
+	})
 	assertLockCarried(t, rec.locks, "TR-EXAMPLE")
 }

@@ -626,7 +626,7 @@ func TestTransport_Request_BothAuthMethods(t *testing.T) {
 	}
 }
 
-// TestClearSAPSessionCookies_ReplacesJar pins the ICMENOSESSION
+// TestClearSAPSessionCookies_EmptiesJarInPlace pins the ICMENOSESSION
 // recovery path observed in long-running MCP servers: after the first
 // Lock → Write → Unlock → Activate sequence SAP closes the stateful
 // context on its side, but sap-contextid cookies the server issued
@@ -638,11 +638,12 @@ func TestTransport_Request_BothAuthMethods(t *testing.T) {
 //
 // Go's http.CookieJar interface does not expose the stored Path, so a
 // targeted SetCookies-with-MaxAge=-1 expire leaves cookies on unknown
-// paths untouched. The recovery therefore swaps the jar for a fresh
-// one. User-supplied cookies in config.Cookies are attached per
+// paths untouched. The recovery therefore empties the whole jar — in place
+// since upstream #251, because assigning client.Jar raced every concurrent
+// request. User-supplied cookies in config.Cookies are attached per
 // request via addCookies() and survive unchanged; only dynamically
 // server-deposited entries are lost, which is the intended behaviour.
-func TestClearSAPSessionCookies_ReplacesJar(t *testing.T) {
+func TestClearSAPSessionCookies_EmptiesJarInPlace(t *testing.T) {
 	cfg := NewConfig("https://sap.example.com:44300", "u", "p")
 	transport := NewTransport(cfg)
 
@@ -672,8 +673,12 @@ func TestClearSAPSessionCookies_ReplacesJar(t *testing.T) {
 
 	transport.clearSAPSessionCookies()
 
-	if transport.jar == originalJar {
-		t.Fatal("expected a new jar instance; jar reference unchanged")
+	// The jar object stays: the http.Client holds one jar for its lifetime and
+	// the reset empties it under a lock, so concurrent requests never see
+	// client.Jar change underneath them.
+	if transport.jar != originalJar {
+		t.Fatal("jar reference changed; session recovery must empty the jar in place, " +
+			"assigning client.Jar races every concurrent request")
 	}
 
 	// No path deeper than the ADT root should carry any SAP session
@@ -688,15 +693,13 @@ func TestClearSAPSessionCookies_ReplacesJar(t *testing.T) {
 		}
 	}
 
-	// The underlying *http.Client must also point at the new jar — if
-	// only our cached reference changed, outgoing requests would keep
-	// reading from the old (stale-cookie) jar.
+	// The underlying *http.Client must still read from the very same jar.
 	hc, ok := transport.httpClient.(*http.Client)
 	if !ok {
 		t.Fatal("expected NewTransport to produce an *http.Client")
 	}
 	if hc.Jar != transport.jar {
-		t.Error("*http.Client.Jar must be swapped alongside Transport.jar — otherwise outbound requests keep reading the stale jar")
+		t.Error("*http.Client.Jar and Transport.jar must be the same jar")
 	}
 }
 
