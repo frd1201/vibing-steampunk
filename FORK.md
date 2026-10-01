@@ -94,6 +94,17 @@ git switch main && git merge --no-ff sync/upstream-$(date +%Y-%m)
 git branch -d sync/upstream-$(date +%Y-%m)
 ```
 
+**`lint (advisory)` is red on every sync PR — and that is not a finding.**
+The job runs with `only-new-issues`, which measures against the PR's diff, and a
+sync PR's diff is all of upstream's. Every upstream file counts as "new". The job
+is `continue-on-error`; the gates are `build`, `vet` and `test`. To tell upstream's
+backlog from something we wrote, take each `file:line` from the job log and match
+it against `git diff -U0 upstream/main HEAD`: a hit is ours, no hit is upstream's
+and is **not** fixed here (that would diverge in every file and cost the next sync
+its conflicts). October 2026: 268 findings, none on a line that differs from
+upstream. It cannot be reproduced locally while the installed `golangci-lint` is
+built with an older Go than `go.mod` asks for.
+
 ---
 
 ## Workflow A — your own change
