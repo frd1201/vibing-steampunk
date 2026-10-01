@@ -126,3 +126,56 @@ func TestWriteTextPool_PassesTransportToLock(t *testing.T) {
 	}
 	assertLockCarried(t, rec.locks, "TR-EXAMPLE")
 }
+
+func TestTransportChoice_LockCorrNr(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		plan     *TransportChoice
+		supplied string
+		want     string
+	}{
+		{"supplied wins over the plan", &TransportChoice{Transport: "TR-PLANNED"}, "TR-NAMED", "TR-NAMED"},
+		{"no plan, nothing supplied", nil, "", ""},
+		{"no plan, supplied", nil, "TR-NAMED", "TR-NAMED"},
+		{"plan chose a request", &TransportChoice{Transport: "TR-PLANNED"}, "", "TR-PLANNED"},
+		{"plan chose nothing", &TransportChoice{Reason: "left to SAP"}, "", ""},
+		{"plan failed to create one", &TransportChoice{Transport: "TR-PLANNED", Err: errTransportCreate}, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.plan.lockCorrNr(tc.supplied); got != tc.want {
+				t.Errorf("lockCorrNr = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetDescription_PlannedTransportGoesOnLock pins the case the supplied-only
+// tests cannot: the caller names no request, the plan picks one, and the LOCK
+// must carry it — the write that follows uses the plan's request, so a bare
+// LOCK would bind the lock and the PUT to different ones.
+func TestSetDescription_PlannedTransportGoesOnLock(t *testing.T) {
+	const check = `<?xml version="1.0"?><asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>` +
+		`<OBJECTNAME>ZDEMO</OBJECTNAME><DEVCLASS>ZDEMO</DEVCLASS><RECORDING>X</RECORDING><REQUESTS><CTS_REQUEST><REQ_HEADER>` +
+		`<TRKORR>TR-EXAMPLE</TRKORR><TRSTATUS>D</TRSTATUS><AS4TEXT>feature</AS4TEXT></REQ_HEADER></CTS_REQUEST></REQUESTS></DATA></asx:values></asx:abap>`
+	rec := &lockQueryRecorder{respond: func(r *http.Request) (int, string) {
+		switch {
+		case r.URL.Query().Get("_action") == "LOCK":
+			return http.StatusOK, lockHandleXML
+		case strings.HasSuffix(r.URL.Path, "/cts/transportchecks"):
+			return http.StatusOK, check
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/programs/programs/zdemo"):
+			return http.StatusOK, `<program:abapProgram xmlns:adtcore="http://www.sap.com/adt/core" adtcore:description="Old"/>`
+		default:
+			return http.StatusOK, ""
+		}
+	}}
+
+	res, err := transportableEditClient(rec).SetDescription(context.Background(), "PROG", "ZDEMO", "", "New", "")
+	if err != nil {
+		t.Fatalf("SetDescription failed: %v", err)
+	}
+	assertLockCarried(t, rec.locks, "TR-EXAMPLE")
+	if res.Transport != "TR-EXAMPLE" {
+		t.Errorf("write went under %q, want the planned TR-EXAMPLE", res.Transport)
+	}
+}

@@ -927,7 +927,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 			// Lock for test update
 			trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
-			lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
+			lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 			if err != nil {
 				result.Message += fmt.Sprintf(" (Warning: Failed to lock for test update: %v)", err)
 				return result, nil
@@ -1019,7 +1019,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 		// Lock
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -1125,7 +1125,7 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 
 		// Lock
 		trPlan := c.planTransport(ctx, opts.Transport, objectURL, "")
-		lock, err := c.LockObject(ctx, objectURL, "MODIFY", opts.Transport)
+		lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(opts.Transport))
 		if err != nil {
 			result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 			return result, nil
@@ -1277,7 +1277,7 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 
 	// Lock
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock class: %v", err)
 		return result, nil

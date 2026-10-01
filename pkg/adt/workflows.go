@@ -68,7 +68,7 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 
 	// Step 2: Lock the object
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
@@ -264,7 +264,7 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 
 	// Step 2: Lock
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
-	lock, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
+	lock, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil

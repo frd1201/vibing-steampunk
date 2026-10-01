@@ -334,7 +334,7 @@ func (c *Client) UpdateFromFileWithOptions(ctx context.Context, filePath, transp
 
 	// 5. Lock object
 	trPlan := c.planTransport(ctx, transport, objectURL, "")
-	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY", transport)
+	lockResult, err := c.LockObject(ctx, objectURL, "MODIFY", trPlan.lockCorrNr(transport))
 	if err != nil {
 		return &DeployResult{
 			FilePath:   filePath,
