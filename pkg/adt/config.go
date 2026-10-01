@@ -366,14 +366,18 @@ func (c *Config) NewHTTPClient() *http.Client {
 	//     A box that answers on 44300 and redirects to 8443 is one machine;
 	//     deleting Basic credentials there would break a hop that worked
 	//     before this handler existed.
+	//
+	// The hostname alone is not enough, though: a hop from https to http on the
+	// same host would send Basic credentials and the CSRF token in clear text.
+	// So the scheme may never fall back — see keepsSAPCredentials. A port change
+	// that stays on https, or climbs from http to https (the ICM's own HTTP
+	// redirect), is still one machine and keeps its headers.
+	//
 	// redirectedAwayFromSAP (http.go) compares host:port with EqualFold, so it
 	// is stricter on the port and identical on case; the difference only shows
 	// on a port-changing hop, where this predicate is deliberately the looser
 	// of the two.
-	sapHostname := ""
-	if u, err := url.Parse(c.BaseURL); err == nil {
-		sapHostname = u.Hostname()
-	}
+	sapURL, _ := url.Parse(c.BaseURL)
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
@@ -381,12 +385,7 @@ func (c *Config) NewHTTPClient() *http.Client {
 		if len(via) == 0 {
 			return nil
 		}
-		// An unparseable or scheme-less BaseURL leaves sapHostname empty. Treat
-		// that as "not the SAP host" so the credentials-off-host rule holds;
-		// the alternative is to silently disable the whole handler.
-		onSAPHost := sapHostname != "" &&
-			strings.EqualFold(req.URL.Hostname(), sapHostname)
-		if !onSAPHost {
+		if !keepsSAPCredentials(sapURL, req.URL) {
 			req.Header.Del("Authorization")
 			req.Header.Del("X-CSRF-Token")
 			req.Header.Del("X-sap-adt-sessiontype")
@@ -406,4 +405,21 @@ func (c *Config) NewHTTPClient() *http.Client {
 	}
 
 	return client
+}
+
+// keepsSAPCredentials reports whether a redirect target may still receive the
+// Basic credentials, the CSRF token and the session type of the request that
+// was sent to the SAP system at base: the same hostname (case-folded, port
+// ignored) and no downgrade from https to http. An unparseable or
+// scheme-less BaseURL has no hostname and keeps nothing — that holds the
+// credentials-off-host rule; the alternative is to silently disable the whole
+// handler.
+func keepsSAPCredentials(base, target *url.URL) bool {
+	if base == nil || target == nil || base.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(base.Hostname(), target.Hostname()) {
+		return false
+	}
+	return !strings.EqualFold(base.Scheme, "https") || strings.EqualFold(target.Scheme, "https")
 }

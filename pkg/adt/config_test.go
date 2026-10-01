@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -405,5 +406,76 @@ func TestCheckRedirect_HostMatchIgnoresCaseAndPort(t *testing.T) {
 					tc.target, gotAuth, gotCSRF, tc.wantSet)
 			}
 		})
+	}
+}
+
+// TestCheckRedirect_DoesNotDowngradeScheme pins the half of the rule the host
+// comparison cannot see: a hop to the same host over plain http would send the
+// credentials and the CSRF token in clear text.
+func TestCheckRedirect_DoesNotDowngradeScheme(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		base    string
+		target  string
+		wantSet bool
+	}{
+		{"https to http on the same host drops them", "https://sapdev.example.com", "http://sapdev.example.com:8000/sap/bc/adt/x", false},
+		{"https to http on the same port drops them", "https://sapdev.example.com:44300", "http://sapdev.example.com:44300/x", false},
+		{"http to https on another port keeps them", "http://sapdev.example.com:8000", "https://sapdev.example.com:44300/sap/bc/adt/x", true},
+		{"http to http on the same host keeps them", "http://sapdev.example.com:8000", "http://sapdev.example.com:8001/x", true},
+		{"https to https on another port keeps them", "https://sapdev.example.com:44300", "https://sapdev.example.com:8443/x", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewConfig(tc.base, "TESTUSER", "secret").NewHTTPClient()
+			first, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.base+"/sap/bc/adt/discovery", nil)
+			first.SetBasicAuth("TESTUSER", "secret")
+			first.Header.Set("X-CSRF-Token", "tok")
+			first.Header.Set("X-sap-adt-sessiontype", "stateful")
+
+			next, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.target, nil)
+			// What net/http's own copier has already done before CheckRedirect runs.
+			next.Header.Set("X-CSRF-Token", "tok")
+			next.Header.Set("X-sap-adt-sessiontype", "stateful")
+			if err := client.CheckRedirect(next, []*http.Request{first}); err != nil {
+				t.Fatalf("CheckRedirect: %v", err)
+			}
+			for _, h := range []string{"Authorization", "X-CSRF-Token", "X-sap-adt-sessiontype"} {
+				if got := next.Header.Get(h) != ""; got != tc.wantSet {
+					t.Errorf("%s set=%v, want %v", h, got, tc.wantSet)
+				}
+			}
+		})
+	}
+}
+
+func TestKeepsSAPCredentials(t *testing.T) {
+	parse := func(s string) *url.URL {
+		u, err := url.Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	for _, tc := range []struct {
+		name         string
+		base, target string
+		want         bool
+	}{
+		{"same origin", "https://sap.example.com", "https://sap.example.com/x", true},
+		{"case-folded host", "https://SAP.example.com", "https://sap.example.com/x", true},
+		{"explicit default port", "https://sap.example.com", "https://sap.example.com:443/x", true},
+		{"foreign host", "https://sap.example.com", "https://idp.example.org/x", false},
+		{"downgrade", "https://sap.example.com", "http://sap.example.com/x", false},
+		{"upgrade", "http://sap.example.com:8000", "https://sap.example.com:44300/x", true},
+		{"scheme-less BaseURL has no host", "sap.example.com", "https://sap.example.com/x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := keepsSAPCredentials(parse(tc.base), parse(tc.target)); got != tc.want {
+				t.Errorf("keepsSAPCredentials(%s, %s) = %v, want %v", tc.base, tc.target, got, tc.want)
+			}
+		})
+	}
+	if keepsSAPCredentials(nil, parse("https://sap.example.com")) {
+		t.Error("nil base keeps credentials")
 	}
 }
