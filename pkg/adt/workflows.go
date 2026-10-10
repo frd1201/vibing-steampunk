@@ -76,16 +76,9 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 		return result, nil
 	}
 
-	// Ensure we unlock on any error. Detached from the caller's cancellation,
-	// and reported rather than dropped: see the same defer in WriteInclude.
-	unlocked := false
-	defer func() {
-		if !unlocked && !result.Success {
-			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
-				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
-			}
-		}
-	}()
+	// Ensure we unlock on any error
+	held := c.holdLock(objectURL, lock.LockHandle)
+	defer held.releaseOnReturn(ctx, &result.Message)
 
 	// Reuse the request the object is already bound to when the caller supplied no
 	// transport, so an already-captured object is not rejected with a spurious 409
@@ -106,13 +99,9 @@ func (c *Client) WriteProgram(ctx context.Context, programName string, source st
 	}
 
 	// Step 4: Unlock before activation (SAP requirement)
-	// Detached, and marked released before the attempt, for the reasons
-	// writeFunctionModule's happy path is: an unlock issued on a context that
-	// has just expired never leaves the process, and the defer must not send a
-	// second UNLOCK for a handle this one already consumed.
-	unlocked = true
-	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = strandedLockAdvice(objectURL, err)
+	err = held.unlock(ctx)
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
 
@@ -190,20 +179,8 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 		result.Message = fmt.Sprintf("Failed to lock object: %v", err)
 		return result, nil
 	}
-	unlocked := false
-	defer func() {
-		if !unlocked && !result.Success {
-			// Detached from the caller's cancellation, and reported rather
-			// than dropped: when the write failed *because* the context was
-			// cancelled or hit its deadline, an unlock on that same context
-			// dies inside http.NewRequestWithContext without sending a byte
-			// and the ENQUEUE stays on the include. The caller's only evidence
-			// of that is this message.
-			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
-				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
-			}
-		}
-	}()
+	held := c.holdLock(objectURL, lock.LockHandle)
+	defer held.releaseOnReturn(ctx, &result.Message)
 
 	// Reuse the request the object is already bound to when the caller supplied no
 	// transport, so an already-captured object is not rejected with a spurious 409
@@ -219,13 +196,8 @@ func (c *Client) WriteInclude(ctx context.Context, includeName string, source st
 		return result, nil
 	}
 
-	// Detached, and marked released before the attempt, for the reasons
-	// writeFunctionModule's happy path is: an unlock issued on a context that
-	// has just expired never leaves the process, and the defer must not send a
-	// second UNLOCK for a handle this one already consumed.
-	unlocked = true
-	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = strandedLockAdvice(objectURL, err)
+	if err = held.unlock(ctx); err != nil {
+		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
 
@@ -310,16 +282,8 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 		return result, nil
 	}
 
-	// Detached from the caller's cancellation, and reported rather than
-	// dropped: see the same defer in WriteInclude.
-	unlocked := false
-	defer func() {
-		if !unlocked && !result.Success {
-			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
-				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
-			}
-		}
-	}()
+	held := c.holdLock(objectURL, lock.LockHandle)
+	defer held.releaseOnReturn(ctx, &result.Message)
 
 	// Reuse the request the object is already bound to when the caller supplied no
 	// transport, so an already-captured object is not rejected with a spurious 409
@@ -340,13 +304,9 @@ func (c *Client) WriteClass(ctx context.Context, className string, source string
 	}
 
 	// Step 4: Unlock
-	// Detached, and marked released before the attempt, for the reasons
-	// writeFunctionModule's happy path is: an unlock issued on a context that
-	// has just expired never leaves the process, and the defer must not send a
-	// second UNLOCK for a handle this one already consumed.
-	unlocked = true
-	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = strandedLockAdvice(objectURL, err)
+	err = held.unlock(ctx)
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
 
@@ -439,16 +399,8 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 		return result, nil
 	}
 
-	// Detached from the caller's cancellation, and reported rather than
-	// dropped: see the same defer in WriteInclude.
-	unlocked := false
-	defer func() {
-		if !unlocked && !result.Success {
-			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
-				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
-			}
-		}
-	}()
+	held := c.holdLock(objectURL, lock.LockHandle)
+	defer held.releaseOnReturn(ctx, &result.Message)
 
 	// Step 3: Update source
 	err = c.UpdateSource(ctx, sourceURL, source, lock.LockHandle, transport)
@@ -458,13 +410,9 @@ func (c *Client) CreateAndActivateProgram(ctx context.Context, programName strin
 	}
 
 	// Step 4: Unlock
-	// Detached, and marked released before the attempt, for the reasons
-	// writeFunctionModule's happy path is: an unlock issued on a context that
-	// has just expired never leaves the process, and the defer must not send a
-	// second UNLOCK for a handle this one already consumed.
-	unlocked = true
-	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = strandedLockAdvice(objectURL, err)
+	err = held.unlock(ctx)
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
 
@@ -548,16 +496,8 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 		return result, nil
 	}
 
-	// Detached from the caller's cancellation, and reported rather than
-	// dropped: see the same defer in WriteInclude.
-	unlocked := false
-	defer func() {
-		if !unlocked && !result.Success {
-			if unlockErr := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); unlockErr != nil {
-				result.Message = joinMessage(result.Message, strandedLockAdvice(objectURL, unlockErr))
-			}
-		}
-	}()
+	held := c.holdLock(objectURL, lock.LockHandle)
+	defer held.releaseOnReturn(ctx, &result.Message)
 
 	// Step 3: Update main source
 	err = c.UpdateSource(ctx, sourceURL, classSource, lock.LockHandle, transport)
@@ -581,13 +521,9 @@ func (c *Client) CreateClassWithTests(ctx context.Context, className string, des
 	}
 
 	// Step 6: Unlock
-	// Detached, and marked released before the attempt, for the reasons
-	// writeFunctionModule's happy path is: an unlock issued on a context that
-	// has just expired never leaves the process, and the defer must not send a
-	// second UNLOCK for a handle this one already consumed.
-	unlocked = true
-	if err = c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
-		result.Message = strandedLockAdvice(objectURL, err)
+	err = held.unlock(ctx)
+	if err != nil {
+		result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 		return result, nil
 	}
 

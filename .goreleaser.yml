@@ -31,19 +31,9 @@ builds:
     goarch:
       - amd64
       - arm64
-      - "386"
-      - arm
-    goarm:
-      - "7"
-    ignore:
-      # macOS only supports amd64 and arm64
-      - goos: darwin
-        goarch: "386"
-      - goos: darwin
-        goarch: arm
-      # Windows arm (32-bit) is not a standard target
-      - goos: windows
-        goarch: arm
+    # Six platforms, as upstream ships since #342: linux, darwin and windows on
+    # amd64 and arm64. The 32-bit targets (linux-386, linux-arm, windows-386)
+    # are gone; `vsp update` has no asset to pick for them.
 
 # Plain binaries — no zip/tar.gz, matches existing release convention
 archives:

@@ -23,6 +23,8 @@ These tools replace 11 granular read/write operations with intelligent parameter
 
 **Guarded updates:** Call `GetSource(include_hash=true)` to receive `{source, sourceHash}`. Supply that hash as `expected_source_hash` to `WriteSource`, `EditSource`, `ImportFromFile`, or `DeployFromFile`; VSP checks it again after acquiring the write lock and rejects `SOURCE_DRIFT` rather than overwriting another editor's work. Guarded successes include the requested target and verified read-back hashes.
 
+**Summary reads:** `GetSource(summary=true)` returns `{objectType, name, uri, lines, bytes, sha256, sourceHash}` instead of the source, from the same single read. `sha256` is the lower-case hex SHA-256 of the exact text a read returns (not normalised). `GetSource(if_none_match="<sha256>")` answers `unchanged: source sha256 ...` while the source still has that digest, and the normal read otherwise; it compares the object's own source only, never the dependency context. `sourceHash` is omitted (with `sourceHashNote`) where WriteSource refuses it, such as a method-level read; `uri` is the source that served the text, with `requested` when that differs. Both `summary` and `if_none_match` bypass the response cache (`VSP_CACHE`), so "unchanged" is about the source as it is now. `GetSource(include_hash=true)` carries the same `sha256` next to the source.
+
 ---
 
 ## Search & Grep Tools (4 tools)
@@ -194,15 +196,18 @@ Solves token limit problem for large files:
 | `SaveToFile` | Legacy name for ExportToFile | Expert |
 | `RenameObject` | Rename object by creating copy | Expert |
 
-**Supported Extensions:**
-- `.clas.abap` - Classes
-- `.prog.abap` - Programs
+**Supported Extensions** (matched without regard to case):
+- `.clas.abap` - Classes (plus `.clas.testclasses.abap`, `.clas.locals_def.abap`, `.clas.locals_imp.abap`, `.clas.macros.abap`)
+- `.prog.abap` - Programs. When the `.prog.xml` abapGit writes beside it says `<SUBC>I</SUBC>`, it is the include named for the file (abapGit keeps includes this way); otherwise it must open with `REPORT`/`PROGRAM` naming the file's program.
+- `.incl.abap` - Includes (ExportToFile writes includes with this suffix)
 - `.intf.abap` - Interfaces
 - `.fugr.abap` - Function Groups
-- `.func.abap` - Function Modules
+- `{group}.fugr.{module}.abap` - Function Modules, abapGit's name (ExportToFile writes this when the group is known). `{group}.fugr.{module}.func.abap` and `{module}.func.abap` are still read; without the group in the name, a module cannot be deployed.
 - `.ddls.asddls` - CDS DDL Sources (ABAPGit format)
 - `.bdef.asbdef` - Behavior Definitions (ABAPGit format)
 - `.srvd.srvdsrv` - Service Definitions (ABAPGit format)
+- A typed file's object is always the one in its file name (`#` stands for `/`), never the one in its content. A file whose main statement names another object is refused rather than deployed under either name: `zrep_top.prog.abap` holding `PROGRAM zrep.` does not overwrite `ZREP`. In a `.clas.abap`/`.intf.abap`, `DEFERRED`, `LOAD` and local (non-`PUBLIC`) declarations before the global one are passed over.
+- Plain `{name}.abap` - typed from its first statement, only when that statement names `{name}` itself (`REPORT zfoo.` in `zfoo.abap`). A class or interface must be declared `PUBLIC`. A file with no such statement is read as include `{name}`, which is how older exports wrote includes. Anything else, such as a TOP include that opens with its main program's `PROGRAM` statement, is refused with a message saying how to rename it.
 
 ---
 
@@ -332,14 +337,13 @@ src/
 
 ---
 
-## Install/Setup Tools (3 tools) - NEW v2.17.0
+## Install/Setup Tools - NEW v2.17.0
 
 Deploy VSP components and dependencies to SAP systems via ADT.
 
 | Tool | Description | Mode |
 |------|-------------|------|
 | `InstallZADTVSP` | Deploy ZADT_VSP WebSocket handler (6 ABAP objects) | Focused |
-| `InstallAbapGit` | Deploy abapGit from embedded ZIP (standalone or dev edition) | Focused |
 | `ListDependencies` | List available dependencies for installation | Focused |
 
 **InstallZADTVSP Parameters:**
@@ -347,10 +351,8 @@ Deploy VSP components and dependencies to SAP systems via ADT.
 - `skip_git_service` - Skip Git service if no abapGit (default: auto-detected)
 - `check_only` - Only check prerequisites, don't deploy
 
-**InstallAbapGit Parameters:**
-- `edition` - `standalone` (single program) or `dev` (full packages)
-- `package` - Target package (default: `$ABAPGIT` or `$ZGIT_DEV`)
-- `check_only` - Only show deployment plan
+**abapGit:** install is CLI-only (standalone edition) for now: `vsp install abapgit --edition standalone`.
+The MCP install tool is being rebuilt (#277); the developer edition is not installable yet.
 
 **Architecture:**
 ```
@@ -361,8 +363,8 @@ embedded/
 │   └── embed.go
 │
 └── deps/           # Dependencies (abapGit ZIP format)
-    ├── abapgit-standalone.zip  # Placeholder
-    ├── abapgit-dev.zip         # Placeholder
+    ├── abapgit-standalone.zip  # Embedded standalone ZABAPGIT
+    ├── abapgit-full.zip        # Empty placeholder (#277)
     └── embed.go                # Unzip + deploy logic
 ```
 

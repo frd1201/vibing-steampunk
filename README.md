@@ -176,6 +176,58 @@ ends with a stack read, every catch was thrown away. It serves the same document
 from the dispatcher instead. The shape is discovered once per session and
 remembered.
 
+### Debug from your editor (DAP)
+
+`vsp dap` is a Debug Adapter Protocol server on stdin/stdout. VS Code, nvim-dap,
+JetBrains and other DAP clients can use it to set breakpoints in ABAP and step
+through it on a real system. It is the same debugger as `vsp adt debug`: SAP's
+own `/sap/bc/adt/debugger*` resources on one held stateful session, with nothing
+installed on the server.
+
+- **Logon:** vsp's usual config (a `.vsp.json` system, or `SAP_*` env). The launch
+  configuration names a system and a user, never a password.
+- **What it does:** it arms your breakpoints and waits. Run the program in SAP
+  (SE38, a unit test, an RFC call, a job) and the editor stops on the line. vsp
+  never starts the program itself, and it is not an MCP tool.
+- **Breakpoints:** set them in files named by vsp's export convention
+  (`zcl_x.clas.abap`, `zrep.prog.abap`, `zgrp.fugr.z_fm.abap`, ...). Stack frames
+  open the local file when it is under `sourceRoot`. Otherwise the source is read
+  from SAP.
+- **Read-only systems:** you can still debug, but you can't change variables.
+
+VS Code: until the vsp extension ships, any extension can declare the adapter in
+its `package.json`. The `launch.json` entry then uses that type:
+
+```jsonc
+// package.json of a local extension
+"contributes": {
+  "breakpoints": [{ "language": "abap" }],
+  "debuggers": [{ "type": "abap-sap", "label": "ABAP (vsp)", "program": "vsp", "args": ["dap"] }]
+}
+
+// .vscode/launch.json
+{ "type": "abap-sap", "request": "attach", "name": "ABAP on A4H",
+  "system": "a4h", "object": "ZVSP_DEBUG_DEMO", "sourceRoot": "${workspaceFolder}" }
+```
+
+nvim-dap:
+
+```lua
+local dap = require('dap')
+dap.adapters.vsp = { type = 'executable', command = 'vsp', args = { 'dap' } }
+dap.configurations.abap = {
+  { type = 'vsp', request = 'attach', name = 'ABAP on A4H',
+    system = 'a4h', object = 'ZVSP_DEBUG_DEMO', sourceRoot = '${workspaceFolder}' },
+}
+```
+
+Launch and attach take the same arguments: `system`, `user` (whose debuggees to
+catch; the default is the logon user), `object` and `include` (optional, resolved
+at start), `sourceRoot`, `systemDebugging` and `listenSeconds`. Supported
+requests: breakpoints, continue, step over/in/out, the stack, and variables
+(locals, globals, and structures and tables expanded in place). Changing a
+variable is also supported.
+
 ### AMDP debugging over plain ADT — the breakpoint fires
 
 An AMDP method runs inside HANA, not inside ABAP, so debugging one means
@@ -533,6 +585,173 @@ under `--read-only`. If the buffer add fails while the request is certainly not 
 buffer, the two files this upload wrote are deleted again. Taking a request
 out of the queue again is done in STMS.
 
+Whether a request has been imported, and how it went, is in TPALOG: MCP
+`system` with the read-only `import_status` (`transport`: one request, a
+comma-separated list or an array; optional `since`, `YYYYMMDD[hhmmss]`) lists
+the tp steps each request has in this server's own system, oldest first, with
+the worst return code. No steps means tp has not touched the request there, or,
+with `since`, not since that time: an earlier import is filtered out, not absent.
+Each step carries its client, step code, return code, time and target system
+(`TARSYSTEM`). Step times and `since` are UTC (`TRTIME` is a UTC time stamp).
+In the system the request was exported from, TPALOG also holds the export
+steps (`E`, `e`, `f`), and `maxRc` covers them too, so having steps there does
+not mean the request was imported. It reads TPALOG over classic RFC (`RFC_READ_TABLE`, with a WHERE clause vsp
+builds from the checked request numbers), so it needs the system's RFC
+settings, `--enable-transports` (or `--allow-transportable-edits`) and a
+request that `--allowed-transports` lets through, and it stays available under
+`--read-only`.
+
+**Import an abapGit zip** into a package in one call, with the abapGit
+installed on the system: an offline repository for the package, abapGit's
+deserialize checks, deserialize, activation -- and back come the outcome,
+abapGit's errors and warnings, the TADIR rows created or changed and the
+repository key. `git delete-objects` undoes it item by item.
+
+```bash
+vsp -s devsys git import-zip ./demo.zip --package '$ZDEMO'               # waits up to --wait (5m) for the job
+vsp -s devsys git import-zip ./demo.zip --package '$ZDEMO' --overwrite   # into its existing offline repository, overwriting
+vsp -s devsys git import-status 12345678                                 # a job still running, read-only
+vsp -s devsys git delete-objects --package '$ZDEMO' "PROG ZDEMO_REPORT" "CLAS ZCL_DEMO"
+vsp -s devsys git delete-objects --package '$ZDEMO' --delete-repo "PROG ZDEMO_REPORT"   # and unregister its offline repository
+vsp -s devsys git object-versions --package '$ZDEMO' "CLAS ZCL_DEMO" --sha256          # read-only: the versions to expect
+vsp -s devsys git delete-objects --package '$ZDEMO' "CLAS ZCL_DEMO" \
+    --expect "CLAS ZCL_DEMO sha256=<from object-versions --sha256>"                     # only while it is still that version
+```
+
+MCP: `system` with `git_import_zip` (`file_path` or `zip_base64`, `package`,
+`repo_name`, `overwrite`, `transport`, `wait_seconds`), the read-only
+`git_import_status` (`job`), `git_delete_objects` (`package`, `objects`,
+`delete_repo`, `expect_repo`, `keep_order`), and the read-only `git_object_versions`
+(`package`, `objects`, `sha256`).
+
+Nothing that exists is overwritten without `overwrite`, and a package that
+already has a repository is refused without it. A package that exists
+without a repository is imported into without `overwrite`; its own package
+entry is left as it is. `overwrite` also needs deletes allowed
+(`--disallowed-ops` without `D`), since abapGit deletes and recreates an
+object whose type changed. Unmet requirements or APACK
+dependencies, an object of another package, a package move, potential data
+loss, an unsupported object type and table content refuse the import; a
+local object the zip does not have is never deleted. Before a byte is sent,
+vsp reads the zip's `.abapgit.xml` and folders and checks the target package
+and every package the zip maps to against `--allowed-packages`; ZADT_VSP
+checks again that every file maps to one of those packages. A transportable
+package needs `--allow-transportable-edits` and a transport (named, or chosen
+as for any write); a local one takes none, and only a local one is created by
+the import. Refused under `--read-only`.
+
+`git_delete_objects` deletes exactly the listed TADIR items -- each only when
+the package's TADIR has it, each through the same gated delete as any other
+-- then the package itself if nothing and no subpackage is left and no
+abapGit repository is registered for it. Nothing outside the package is
+deleted, a package is never an item, and when an object cannot be deleted
+the repository and the package stay. The repository registered for the
+package (its row: URL, branch, settings) is kept unless `delete_repo: true`
+(`--delete-repo`) is given, and then it is unregistered only if it is offline
+and the package is empty after the deletes; ZADT_VSP checks both again. An
+online repository is never unregistered: `delete_repo` with one is refused
+before anything is deleted. A repository abapGit cannot open counts as
+online, and the package is never deleted while any repository is registered
+for it. Objects are deleted at their own ADT address (an include, a
+structure), looked up by name.
+
+To delete only what is still the version you decided on, read the versions
+first (`git_object_versions`, `vsp git object-versions --sha256`) and pass
+them back: an object `{"type", "name", "expect": {"sha256": ...}}` (or
+`"stamp"`; with both, sha256 decides). vsp takes the object's ADT lock,
+reads its version again while it holds the lock, and deletes it only on a
+match; otherwise its status is `changed`, with what it is now (`observed`),
+and it is kept. A version that cannot be read never matches. Objects are
+checked and deleted one at a time: when one comes back `changed` (or
+`failed`), **the other objects listed are still deleted**; only the
+repository and the package are kept. There is no all-or-nothing mode yet.
+
+Objects are deleted users before what they use: code (PROG, CLAS, INTF,
+FUGR, XSLT and any type not named here), then RAP (SRVB, SRVD, BDEF,
+DCLS/DDLX, DDLS), then search helps and lock objects (SHLP, ENQU), table
+types (TTYP), tables and structures (TABL), data elements (DTEL), domains
+(DOMA); within a type, in the order given. An append structure is not
+yet ordered before the table it extends (both are TABL): list it first.
+`keep_order: true` (`--keep-order`) deletes exactly in the order given.
+The result's `order` is every delete attempt in the order made; an object
+retried after a failure is listed twice. Each expectation is read right before its own delete,
+after the deletes ahead of it, while a sha256 read before the call is of the
+state before any of them -- which is why the order matters: deleting a data
+element first changes the serialisation, and so the sha256, of a table that
+uses it, and the table would come back `changed`.
+
+The ADT lock is the workbench enqueue: a second ADT session -- even the same
+user's -- is refused while it is held (checked live: `EU 510`), and abapGit's
+import refuses an object with that lock entry. That editors outside ADT (SE38,
+SE24, SE11, SE51 for dynpros, SE41 for GUI status, SE63/SE61 for texts and
+documentation) take the same enqueue for every part they write is expected
+but has not been verified for each of them; anything that writes the tables
+directly, without the enqueue, is not held off by it.
+`expect_repo: {"key", "name"}` (`--expect-repo-key`, `--expect-repo-name`)
+unregisters the repository only when it is exactly that row; otherwise
+`repoNote` is `kept: registered repository is <key> <name>`.
+
+**Use `sha256` when it matters.** It is the SHA-256 (lower-case hex) of the
+UTF-8 text of the lines `<file name>=<SHA-256 of the file>`, one per file
+of the object's abapGit serialisation in its original language only,
+sorted, joined by LF without a final LF -- so it covers everything abapGit
+serialises for the object. It sees only the active version: an object with
+an inactive version (a row of the inactive worklist DWINACTIV for it or a
+part of it, reported as `inactive`) is never a sha256 match, so
+unactivated work is not deleted unnoticed. Reading it serialises the object
+with abapGit, which only reads.
+
+The stamp is cheaper and coarser:
+`v2:<TABLES>:<YYYYMMDDHHMMSS>:<ROWS>:<DIGEST>`, the newest change date and
+time over the object's dated version rows (active and inactive), the number
+of those rows, and the first 16 hex digits of a SHA-256 over the rows of
+some tables that carry no date:
+
+| Type | Dated rows | Digest |
+|------|------------|--------|
+| CLAS, INTF | REPOSRC (every include of the pool but CS, which is regenerated without the source changing), REPOTEXT (text pool) | SEOCLASSDF, SEOCLASSTX, SEOCOMPOTX |
+| PROG | REPOSRC, REPOTEXT (text pool), D020S (dynpro generation) | |
+| TABL | DD02L, DD09L (technical settings), DD12L (indexes) | DD02T, DD35L (search help assignment), TDDAT |
+| DTEL | DD04L | DD04T |
+| DOMA | DD01L | DD01T, DD07L, DD07T |
+| TTYP | DD40L | DD40T |
+| DDLS | DDDDLSRC | DDDDLSRCT |
+
+**What the stamp does not see**, so that a change there alone leaves it as
+it was: documentation (DOKHL/DOKTL) of every type; a program's GUI status
+and titles (EUDB, RSMPTEXTS) and a dynpro changed without being generated;
+a class's or interface's SOTR texts, sub-component texts (SEOSUBCOTX:
+parameter and exception descriptions), relations and friends (SEOMETAREL,
+SEOFRIENDS) and component properties its source does not carry; a table's
+field texts (DD03T), foreign keys (DD05S, DD08L) and search help field
+mapping (DD36M), unless the change also updated a dated row; and two
+changes within the second the stamp was read in. Other types have no stamp.
+
+The stamp also moves where sha256 does not: on a translation in any
+language (it reads the text tables in every language; sha256 covers the
+original language only), and on a dynpro's regeneration (D020S's
+generation date moves without a change). Both give a `changed` where
+nothing sha256 covers changed -- the safe side. Inactive versions are
+looked up by name, whatever the object type, so an inactive DTEL ZFOO also
+marks DOMA ZFOO inactive -- the safe side too. A ZADT_VSP too old to report
+`inactive` makes a sha256 expectation `failed` ("ZADT_VSP too old"), never a
+match.
+
+A zip is refused above 20 MB, 50,000 entries or 200 MB unpacked (its
+declared sizes, checked by vsp and again by ZADT_VSP before abapGit unpacks
+it), and with more than one `.abapgit.xml` at its root. If the import's
+commit gets no answer, the job may be running: vsp says so, and
+`git_import_status` or SM37 (job `ZVSP_GIT_IMPORT`) tells.
+
+abapGit's deserialize commits with `WAIT`, which a ZADT_VSP (APC) session may
+not do (it dumps `APC_ILLEGAL_STATEMENT`), so the import runs as background
+job `ZVSP_GIT_IMPORT` under the caller's user; its outcome is pushed to the
+WebSocket that started it (AMC application `ZVSP_GIT`, channel `/import`) and
+kept a week for `git_import_status`. Needs ZADT_VSP with the git service,
+which `vsp install zadt-vsp` deploys where abapGit is installed (with the job
+program and the AMC application); without abapGit the rest of ZADT_VSP still
+runs.
+
 `vsp update` fetches the latest release for this platform, compares it with
 the running version, verifies the download against the release's
 `checksums.txt`, and puts it in place of the running binary — the old one is
@@ -889,9 +1108,224 @@ Earlier: **[Still Only 5%](articles/2026-08-25-still-five-percent.md)** · **[VS
 
 ## What's New
 
-The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.57.0 — the dump's own why](https://github.com/oisee/vibing-steampunk/releases/tag/v2.57.0)**.
+The headline changes are in the **"New in the last three releases"** callout at the top of this README; the full version history is in [CHANGELOG.md](CHANGELOG.md). Latest release: **[v2.61.0 — snc and traces](https://github.com/oisee/vibing-steampunk/releases/tag/v2.61.0)**.
 
-### Unreleased — behaviour changes since v2.58.0
+### v2.61.0 — new since v2.60.0
+
+Reach SNC-only systems from one `vsp.exe`, and read ABAP traces as they really are.
+
+**New:** SNC single sign-on through SAP's `sapnwrfc.dll` (Windows). A system with an `snc` block in `~/.vsp.json` logs on with Kerberos through the SAP NW RFC SDK and carries ADT over RFC, with no password and no browser. The block names the SAP Logon entry, system, client, user and `production`. `vsp.exe` runs itself as the helper (`vsp snc-serve`) and loads the SDK only in a guarded worker:
+- tracing is off and the worker's directory refuses files;
+- DLLs are searched only beside the SDK and in System32;
+- the logon is never retried;
+- the system, client and user are checked after logon.
+
+The channel is read-only. On `"production": true` it forwards GETs only; elsewhere it forwards bounded data preview SELECTs too. In `.mcp.json` it is just `["-s", "dev"]`. From WSL, a Linux vsp uses the Windows `vsp.exe` as its `transport_cmd`. The SDK itself is SAP's: download it from the SAP Software Center. See [SNC single sign-on through sapnwrfc.dll](#snc-single-sign-on-through-sapnwrfcdll-windows).
+
+**New:** transport command. `transport_cmd` in `~/.vsp.json` (or `--transport-cmd`, `SAP_TRANSPORT_CMD`) carries every ADT request over a helper process's stdin/stdout, and the helper does its own sign-on (#373). `-s NAME` gives the MCP server its logon from such a system. See [Transport command](#transport-command-adt-through-a-helper-process).
+
+**Fixed:**
+
+- **ABAP traces read as they are** (#376).
+  - `get_trace` returned empty hit-list entries on 7.58. It now parses the real format: event, program, line, calls, own and total time.
+  - It sorts by own time and returns the top 50 (`top`, `sort_by`). It also reads `dbAccesses` and the call tree, and returns `raw` XML on request.
+  - `list_traces` shows state, aggregation, size and runtime, newest first.
+  - A trace cut off at its size limit now says so instead of returning a bare 416.
+
+**Behaviour changes:**
+
+- **A `transport_cmd` program must be an absolute path.** The helper runs in its own directory and starts from vsp's environment as it was before `./.env` was loaded, so a project's files and `.env` cannot reach it.
+- **The `snc` block requires `"production"`.**
+
+### v2.60.0 — new since v2.59.1
+
+Debug from your editor, pin where vsp may work, read less to know more.
+v2.59.x continues as an LTS line on `release/2.59` (fixes only).
+
+**New:** `vsp dap`, a Debug Adapter Protocol server. It lets you debug ABAP from VS Code, nvim-dap or JetBrains on a real system, with no Z code. See [Debug from your editor (DAP)](#debug-from-your-editor-dap).
+
+**New:** read summary. `SAP(action="read", ..., params={"summary": true})`
+(`vsp source read ... --summary`) returns the lines, bytes and `sha256` of
+the source instead of the source. `params={"if_none_match": "<sha256>"}`
+(`--if-none-match`) answers "unchanged: source sha256 …" while the source
+still has that digest. Only the object's own source is compared, not the
+dependency context. A read with `include_hash` now carries the same `sha256`. The digest is over the exact text, not normalised. See
+[Read Summary](#read-summary--is-this-the-version-i-already-have).
+
+**Fixed:**
+
+- **`vsp dap` releases everything it took.** Every exit path (disconnect,
+  end of stream, a signal, a failed step or attach) clears the breakpoints,
+  releases the debuggee and stops the listener. A disconnect during a listen
+  no longer waits behind it: measured on a real system, 58 s → 0.1 s (#346).
+- **A failed BADI_IMPL leaves no empty ENHO** (#349, ported from #336). The
+  shared cleanup after a failed create now also releases the lock it took,
+  and a container whose transport request can't be established is kept, with
+  the manual step named, rather than deleted past `--allowed-transports`.
+- **The leak scan can't be blinded.** Control bytes in a commit message, a
+  file name or a foreign message encoding no longer hide a value from it, and
+  it never prints a scanned path or value in its own log (#347).
+
+**Moved out:** the ABAP transpilers (`vsp compile`) now live in [ABAPiti](https://github.com/oisee/abapiti).
+
+**New:** `--expect SID[.CLIENT][/USER]` (or `SAP_EXPECT`, or `"expect"` on a
+`.vsp.json` system) pins where vsp may work, e.g. `--expect A4H.001/DEVELOPER`.
+A configured user that differs is refused at startup, before any logon. On
+the first request, vsp asks the system for its SID, client and user and
+refuses everything when they differ. `SAP()` shows `pinned: A4H.001/DEVELOPER ✓`.
+Without a pin, nothing changes and no extra request is sent. The server's
+startup log and `vsp config show` now say where the logon came from.
+
+**Platforms:** six binaries: linux-amd64, linux-arm64, darwin-amd64,
+darwin-arm64, windows-amd64 and windows-arm64. `vsp-linux-386`,
+`vsp-linux-arm` and `vsp-windows-386` are no longer built. On those platforms,
+install from source instead:
+`go install github.com/oisee/vibing-steampunk/cmd/vsp@latest`
+(`vsp update` from v2.59.x only reports that the release has no asset for
+the platform and leaves the installed binary alone; from v2.60.0 on it says
+why and gives this command).
+
+### v2.59.1 — new since v2.59.0
+
+The first release built, checked and published by CI on the tag push
+(`.github/workflows/release.yml`), not by hand.
+
+**Release assets fixed**
+
+- **`vsp-linux-amd64` is static again.** v2.59.0's needed glibc 2.34 or later.
+  Every binary is now built with `CGO_ENABLED=0`.
+- **`LICENSE` and `NOTICE` ship with the binaries.** Apache-2.0 components are
+  embedded.
+- **The build info names the release commit.** CI refuses a binary whose Go
+  VCS stamp is not the tag's commit or comes from a modified tree. It runs
+  `--version` on Linux, macOS and Windows (x64 and ARM), and publishes only
+  after downloading the draft back and comparing it byte for byte (#329).
+
+**New**
+
+- **Has a transport been imported here, and how did it go?** MCP `system`
+  `import_status` reads a request's tp steps from TPALOG, read-only (#332,
+  ported from #297).
+- **Activation failures say why.** `vsp install`, `copy`, `source write` and
+  `source edit` print the activation messages: object, line and text,
+  capped at 20 (#333).
+- **Long writes take the call timeout.** WriteSource, EditSource and the
+  activations honour `--call-timeout` / `params.timeout`, so a large program
+  is no longer cut at 60 s. A lock taken before the time ran out is still
+  released. If vsp cannot confirm the release, it says the lock may still
+  be held (#333).
+
+**Fixed**
+
+- **Deleting or updating with your own lock handle on SAP_BASIS 816.** The
+  package check now runs inside that lock's session, so the write no longer
+  comes back 423 (#331, ported from #292).
+- **No false "package does not exist".** The check before a create read
+  "404" anywhere in an error, including a port number in its URL, so a
+  timeout could be reported as a missing package (#338).
+
+**Removed**
+
+- **Three MCP tools that did nothing useful.** `InstallAbapGit` deployed
+  nothing but reported success, `InstallDummyTest` was a test tool, and
+  `WriteDataElementLabels` always refused. abapGit's standalone edition still
+  installs with `vsp install abapgit --edition standalone` (#334, #277).
+
+**Coming in the next release: fewer platforms.** `vsp-linux-386`,
+`vsp-linux-arm` and `vsp-windows-386` will no longer be built. Together they
+were about 6% of downloads. The remaining six are linux, macOS and Windows,
+each on amd64 and arm64.
+
+### v2.59.0 — new since v2.58.0
+
+**Transports and change control**
+
+- **Upload a released transport and add it to the import queue — never import.**
+  `vsp transport upload` / `system` `upload_transport` writes the cofile and
+  data file into DIR_TRANS and adds the request to the buffer; the import
+  itself stays a human step in STMS (#296). Also: `transport status`,
+  `transport buffer` and `transport download`.
+- **A transport of copies** of a request, as SE01 builds one (#247); entries
+  added to a request and taken out, as SE09 does (#262); requests filed under
+  a CTS project (#246); a refused release is reported, not swallowed (#248).
+
+**abapGit offline zip import** (#301). `vsp git import-zip` / `system`
+`git_import_zip` imports an abapGit zip with the abapGit already on the
+system, as a background job; `git import-status` reports on it and
+`git delete-objects` removes exactly what it brought. Needs ZADT_VSP and
+abapGit. Every package the zip maps to must pass `--allowed-packages`.
+`git delete-objects` deletes only what is still the version you saw:
+per-object `expect` (sha256, or a coarser stamp), checked under the ADT
+lock, `expect_repo` for the repository row, and the read-only
+`git_object_versions` (`vsp git object-versions`) to read them (#320).
+
+**Code, run and checked**
+
+- **[ExecuteABAP](#executeabap) answers JSON**: `result_text` is the value in
+  full, `RETURN_VALUE( x )` hands back any number of values (structures and
+  tables as JSON), and a run that did not finish says where in your code (#298).
+- **[ABAP Unit results](#abap-unit-results) as JSON** with counts; a class
+  ABAP Unit refused to run is not a pass; `only_failures` for a short answer (#298).
+- **Check a snippet without running it**: `vsp check-abap` / `analyze`
+  `check_abap`, SAP's own syntax check, findings in the snippet's lines (#300).
+- **Long calls take a `timeout`** (seconds), and `--call-timeout` /
+  `SAP_CALL_TIMEOUT` sets the server's default (#299).
+- **Run a report as a background job** from the SAP tool (#261).
+
+**Read and find**
+
+- **Exact-name search**: `params.exact` / `vsp search --exact` (#299).
+- **A package's inventory in one call**: `read` `DEVC $PKG` with
+  `params.inventory` — objects with author and date, subpackages, and its
+  abapGit repository (#299).
+- **An IDoc as WE02 shows it** (#268).
+- **`vsp query`** accepts the common ANSI spellings and explains what SAP
+  refuses (#267).
+
+**Create**
+
+- Domains and data elements (#273), structures and append structures from
+  DDL (#272), message classes with messages in the language asked (#270),
+  and enhancement implementations — source plug-ins and BAdI
+  implementations (#263).
+
+**Safety and quality**
+
+- **Delete only the version you saw**: `git_delete_objects` takes an expected
+  stamp or sha256 per object, checked under the object's lock right before its
+  DELETE; a changed object is kept and reported (#320). Dependent objects are
+  deleted before what they use (#323), and `git_object_versions` reads the
+  versions first.
+- Typed abapGit files take their name from the file name, never the content,
+  so a TOP include can no longer overwrite its main program (#305, #312).
+- Table reads with caller SQL are refused under `--block-free-sql` (#310);
+  every ZADT_VSP WebSocket authenticates the way its ADT client does (#306).
+- Graph and health: program callers and their main programs (#309), one data
+  source for CLI and MCP (#322), health reads classes and function groups and
+  names what it could not read (#325).
+- A leak scan blocks commits that carry system identifiers (CI and an opt-in
+  pre-push hook); correctness lint blocks new code; the PR report shows
+  complexity and token drift; an advisory integration run against the OSD SAP
+  emulator on every PR (#311, #321, #324, #326).
+
+**Fixed**, among others: concurrent callers of one client no longer break
+each other's locks (#251); a cookie-jar race (#229); credentials and the CSRF
+token stay on the SAP host across redirects (#257); namespaced objects and
+function groups (#233, #274, #282); activation of a group with its inactive
+parts (#271); a failed transport download is an error (#302).
+
+**Behaviour changes you may notice:**
+
+- `execute_abap` (MCP) answers JSON instead of text.
+- `vsp execute` exits non-zero when the code did not finish, never ran, or
+  left its temporary program behind; `vsp test` exits non-zero when a test
+  class was not run.
+- `vsp update` follows the repository the binary was released from (#259).
+- `git_delete_objects` refuses an object given as a map with a key other
+  than `type`, `name` and `expect` (a typo such as `expected` used to be
+  ignored) (#320).
+
+### v2.59.0 — behaviour changes since v2.58.0
 
 **`--read-only` now also refuses**, each before anything reaches SAP:
 
@@ -944,7 +1378,7 @@ must rewrite `Host` to reach vsp over HTTP.
 
 ### Hyperfocused Mode — 1 Tool to Rule Them All (Recommended)
 
-**Recommended for most setups.** Single `SAP(action, target, params)` tool covers most of what the 151 individual tools do — gCTS, revision history and i18n still need `--mode expert`. The same tool is now registered in focused and expert too, so an agent in either can reach the `analyze` surface. Minimal token overhead, maximum capability.
+**Recommended for most setups.** Single `SAP(action, target, params)` tool covers most of what the 148 individual tools do — gCTS, revision history and i18n still need `--mode expert`. The same tool is now registered in focused and expert too, so an agent in either can reach the `analyze` surface. Minimal token overhead, maximum capability.
 
 ```
 SAP(action="read",   target="CLAS ZCL_TRAVEL")
@@ -953,7 +1387,7 @@ SAP(action="create", target="DEVC", params={"name": "$ZOZIK", "description": "Ne
 SAP(action="help",   target="debug")
 ```
 
-| Metric | Focused (100 tools) | Expert (151 tools) | Hyperfocused (1 tool) |
+| Metric | Focused (98 tools) | Expert (148 tools) | Hyperfocused (1 tool) |
 |--------|-------------------:|-------------------:|----------------------:|
 | MCP schema tokens | ~14,000 | ~40,000 | **~200** |
 | Reduction | — | — | **99.5%** |
@@ -1038,6 +1472,34 @@ The AI only sends/receives the method block (~30 lines). vsp fetches the full cl
 
 > *Built-in ABAP parser based on [abaplint](https://github.com/abaplint/abaplint) by [Lars Hvam](https://github.com/larshp) — the same parser that powers abaplint's 392 ABAP statement types.*
 
+### Read Summary — Is This the Version I Already Have?
+
+A read can return what the source *is* instead of the source itself:
+
+```
+SAP(action="read", target="CLAS ZCL_CALCULATOR", params={"summary": true})
+→ {"objectType": "CLAS", "name": "ZCL_CALCULATOR",
+   "uri": "/sap/bc/adt/oo/classes/ZCL_CALCULATOR/source/main",
+   "lines": 412, "bytes": 15873, "sha256": "3f0a…", "sourceHash": "sha256:9c1e…"}
+
+# Later: only pay for the body if it changed
+SAP(action="read", target="CLAS ZCL_CALCULATOR", params={"if_none_match": "3f0a…"})
+→ unchanged: source sha256 3f0a… (CLAS ZCL_CALCULATOR, 412 lines, 15873 bytes); the source was not returned; dependency context not compared: read without if_none_match to refresh it
+```
+
+- **`sha256`** is the lower-case hex SHA-256 of the exact text a read returns, **not normalised**: CRLF stays CRLF and a final newline stays. `sha256sum` over the text you received gives the same value.
+- **`sourceHash`** is the normalised hash (CRLF→LF, trailing newlines dropped) for `expected_source_hash` on a guarded write. It is left out where WriteSource refuses one (a method-level read, a FUNC, types it does not write as source); `sourceHashNote` then says why.
+- **`uri`** is the ADT source that actually served the text. When that is not the one asked for, `requested` names the original: a PROG that ADT knows only as an include is read from `/programs/includes`, and an ENHO names whichever of its endpoints answered.
+- **Never from the response cache.** With `VSP_CACHE=true` (or `cache: true` for a system), a plain read can be answered from the cache for up to its TTL. `summary` and `if_none_match` always read SAP, so "unchanged" means unchanged now, not unchanged since the cache entry was made. The fresh answer refreshes the cache entry.
+- **`if_none_match` compares the object's own source only.** The dependency context a default read appends is not compared, so a changed dependency still answers "unchanged", and the answer says so. Read without `if_none_match` to refresh the context. Pulling the context into the comparison would cost a round trip per dependency, which defeats the point.
+- Neither equals `git_delete_objects`' `expect` sha256: that one is computed on SAP over the object's whole abapGit serialisation (one `<file>=<sha256>` line per file, XML included), so it is never a single source's digest.
+- Both are the same single read as a normal one: no extra SAP round trip, and no dependency context (which costs one per dependency).
+- With `if_none_match` and a different digest you get the normal read, body and all. `summary` and `if_none_match` together report `"unchanged": true|false`.
+- `version` and last-changed author/date are not reported: a plain source GET does not say which version it served nor who changed it, and finding out would cost another round trip.
+- CLI: `vsp source read CLAS ZCL_CALCULATOR --summary`, `--if-none-match <sha256>`.
+
+> **Token-saving tip:** make the first full read with `params={"include_hash": true, "include_context": false}`: it returns the source together with its `sha256`. Keep that digest, and before re-reading the object ask with `if_none_match`: an unchanged 400-line class then costs one line instead of thousands of tokens.
+
 ### Native Go ABAP Lexer — abaplint in Go
 
 The [abaplint](https://github.com/abaplint/abaplint) lexer has been mechanically ported from TypeScript to native Go (`pkg/abaplint`). This is the same lexer that powers abaplint — 48 token types, all 6 lexer modes (normal, string, backtick, template, comment, pragma), with full whitespace-context encoding.
@@ -1062,33 +1524,13 @@ Zero dependencies, zero FFI. Pure Go, ~3.5M tokens/sec, ready for lint rules in 
 
 See [LSP setup](#abap-lsp-for-claude-code) for configuration.
 
-### WASM-to-ABAP Compiler (Research)
+### ABAP Transpilers — Moved to ABAPiti
 
-Compile WebAssembly binaries to native ABAP — advanced prototype, verified on selected corpora. Three paths:
-
-```
-.wasm binary → pkg/wasmcomp (Go)  → ABAP source files     ← AOT compiler
-.ts source   → pkg/ts2abap (Go)   → clean OO ABAP classes  ← direct transpiler
-.wasm binary → zcl_wasm_compiler  → ABAP (on SAP itself!)  ← self-hosting, 785 lines
-```
-
-**Demonstrated on SAP A4H:** QuickJS (1,410 functions) compiled to 101K lines ABAP. abaplint parser (26.5MB) compiled to 396K lines. Self-hosting compiler parses WASM, generates ABAP, and executes via `GENERATE SUBROUTINE POOL` — all within SAP. This is research/prototype work, not a production-ready toolchain.
-
-| What | Size | Status |
-|------|:----:|:------:|
-| QuickJS → ABAP | 101K lines | Compiled |
-| abaplint → ABAP | 396K lines | Compiled |
-| abaplint lexer (TS→ABAP) | 495 lines | Running on SAP |
-| Self-hosting compiler | 785 lines | Running on SAP |
-| Batch deploy | `vsp deploy *.clas.abap` | 40 classes, 0 failures |
-
-> *On main: `pkg/wasmcomp/` and `embedded/abap/wasm_compiler/`. The original
-> branch `feat/wasm-abap` is kept for history. See
-> [reports/2026-03-20-001](reports/2026-03-20-001-wasm-abap-achievement.md).*
+The WASM/TypeScript/LLVM-to-ABAP transpilers (formerly `vsp compile`) now live in their own repo, **[ABAPiti](https://github.com/oisee/abapiti)**, with their history.
 
 ### Full CLI Toolchain — SAP from the Terminal
 
-35+ commands. No SAP GUI, no Eclipse, no IDE. Most work with standard ADT; `lint`/`parse`/`compile` work fully offline.
+35+ commands. No SAP GUI, no Eclipse, no IDE. Most work with standard ADT; `lint`/`parse` work fully offline.
 
 ```bash
 # Package analysis
@@ -1128,6 +1570,7 @@ vsp rfc describe BAPI_USER_GET_DETAIL            # FM interface as JSON Schema
 # Debugging and tracing (nothing installed on the server)
 vsp rfc debug                                    # debug REPL on a pinned RFC session
 vsp adt debug                                    # the same REPL over stateful HTTPS
+vsp dap                                          # the debugger for editors (Debug Adapter Protocol)
 vsp trace run ZFOO --call                        # SAT trace: the measured call tree
 vsp trace unit ZFOO --line 12 --values           # record a unit, statement by statement
 
@@ -1153,7 +1596,6 @@ vsp install zadt-vsp                             # install ZADT_VSP handler
 # Offline tools
 vsp lint --file myclass.clas.abap                # offline ABAP linter
 vsp parse --stdin --format json < source.abap    # ABAP parser
-vsp compile wasm program.wasm --class ZCL_DEMO   # WASM→ABAP compiler
 ```
 
 See **[CLI Guide](docs/cli-guide.md)** for the complete reference with feature requirements matrix.
@@ -1178,7 +1620,7 @@ See **[CLI Guide](docs/cli-guide.md)** for the complete reference with feature r
 | **API Surface** | `vsp api-surface` — Clean Core inventory: which standard APIs does your code use? |
 | **Graph Export** | 7 formats: mermaid, HTML, DOT (Graphviz), PlantUML, GraphML (Gephi), JSON, MD |
 | **Static Analysis** | `vsp analyze` — 13 lint rules in pure Go, no external dependencies |
-| **Hyperfocused Mode** | 1 universal SAP tool, **~200 tokens** vs ~40K for 151 tools |
+| **Hyperfocused Mode** | 1 universal SAP tool, **~200 tokens** vs ~40K for 148 tools |
 | **Context Compression** | Auto-compressed dependency contracts — 7–30x compression, built-in ABAP parser |
 | **Method-Level Surgery** | Read/edit individual methods — 95% token reduction vs full-class round-trips |
 | **ABAP LSP** | Built-in Language Server — real-time diagnostics, go-to-definition, context push |
@@ -1293,6 +1735,8 @@ vsp works in two modes:
 # Source operations
 vsp -s a4h source CLAS ZCL_MY_CLASS              # read source
 vsp -s a4h source read CLAS ZCL_MY_CLASS          # same, explicit
+vsp -s a4h source read CLAS ZCL_MY_CLASS --summary              # lines, bytes, sha256 — no body
+vsp -s a4h source read CLAS ZCL_MY_CLASS --if-none-match <sha>  # "unchanged" or the source
 vsp -s a4h source write CLAS ZCL_FOO < file.abap  # write from stdin
 vsp -s a4h source edit CLAS ZCL_FOO --old "X" --new "Y"  # surgical edit
 vsp -s a4h source context CLAS ZCL_FOO            # source + dependency contracts
@@ -1353,7 +1797,6 @@ vsp -s a4h export '$ZORK' '$ZLLM' -o packages.zip # export abapGit ZIP
 # Bootstrap SAP system (no SAP GUI needed)
 vsp -s a4h install abapgit                        # install abapGit
 vsp -s a4h install zadt-vsp                       # install ZADT_VSP handler
-vsp -s a4h install abapgit --edition full         # full dev edition (576 objects)
 vsp -s a4h install list                           # show installable components
 
 # Transport management
@@ -1504,6 +1947,194 @@ interop, and reads the cookies back over its stdout. Only cookies cross.
 ignored, because basic auth would win in the transport and take the automatic
 recovery down with it.
 
+### Transport command: ADT through a helper process
+
+Some systems are reachable only through a program that does the sign-in itself,
+for example a helper that logs on with a corporate SSO. With a transport command,
+vsp sends every ADT HTTP request to that helper over its stdin and stdout and
+opens no connection and no local port of its own. The helper reaches SAP however
+it can and answers each request.
+
+```bash
+vsp --url https://sidecar.invalid --transport-cmd /opt/tools/adt-helper --transport-arg --profile --transport-arg dev
+export SAP_TRANSPORT_CMD='["/opt/tools/adt-helper", "--profile", "dev"]'   # same, as a JSON array
+```
+
+```json
+{
+  "systems": {
+    "dev": { "url": "https://sidecar.invalid", "client": "100",
+             "transport_cmd": ["C:\\tools\\adt-helper.exe", "--profile", "dev"] }
+  }
+}
+```
+
+- The helper authenticates. A transport command next to user/password, cookies,
+  browser-auth, SAML or SSO is refused. This includes `SAP_USER`/`SAP_PASSWORD`
+  in the environment.
+- The URL is still required, because ADT paths and the `Host` header are built
+  from it. `https://sidecar.invalid` is a fine placeholder when only the helper
+  knows the real address.
+- `transport_cmd` is honoured only in `~/.vsp.json` or `~/.vsp/systems.json`.
+  The same key in a `.vsp.json` in the working directory is refused, and so is
+  `SAP_TRANSPORT_CMD` from a `.env` file, because a project file must not be
+  able to make vsp run a program. "Home" means `HOME` (`USERPROFILE` on
+  Windows) as the vsp process received it, before any `.env` is read. It must
+  be an absolute path. Outside Windows, the file must not be writable by group
+  or others.
+- The ZADT_VSP WebSocket features can't go through the pipe, and they refuse
+  with "not available over a transport command". Classic RFC needs an explicit
+  `rfc_host` (or `--rfc-host`) rather than the placeholder URL.
+
+**Writing a helper.** The protocol is the same in both directions:
+
+1. A frame is a 4-byte big-endian unsigned length followed by exactly that many
+   bytes. Those bytes are one raw HTTP/1.1 message. The limit is 64 MiB per frame.
+2. vsp writes a request in origin form (`GET /sap/bc/adt/...?sap-client=100 HTTP/1.1`)
+   with a `Host` header and its other headers (cookies, `X-CSRF-Token`,
+   `X-sap-adt-sessiontype`, ...). Its body always has a `Content-Length`; it is
+   never chunked.
+3. The helper sends the request on to SAP and writes back one frame holding the
+   complete response: status line, headers (including `Set-Cookie`, which vsp
+   keeps in its cookie jar) and the whole body, either with `Content-Length` or
+   chunked.
+4. Only one request is in flight. vsp writes the next frame only after it has
+   read the answer to the previous one.
+5. When its stdin reaches EOF, the helper exits. vsp closes stdin on shutdown and
+   kills the helper three seconds later. On Windows the helper is put into a Job
+   Object that ends it with vsp. That happens just after the helper starts, so it
+   must start no child processes before the first frame arrives.
+6. The helper gets vsp's environment minus anything whose name looks like a
+   secret (`PASSWORD`, `PASSWD`, `SECRET`, `TOKEN`, `COOKIE`) and minus vsp's own
+   logon settings (`SAP_USER`, `SAP_PASSWORD`, `VSP_*_PASSWORD`, `SAP_RFC_*`).
+   It brings its own configuration.
+7. The helper writes only frames to stdout. Logs go to stderr, which vsp passes
+   through and quotes (the last 20 lines) when the helper fails. Secrets such as
+   tokens, cookies and passwords must never be printed there.
+
+If the helper exits, writes a malformed or oversized frame, or a request is
+abandoned half-way (timeout, cancel), vsp kills the helper and reports the
+transport as broken. It does not restart it, because a new helper would mean a
+new session and the old session's locks would be lost. Restart vsp instead.
+
+### SNC single sign-on through sapnwrfc.dll (Windows)
+
+On Windows, vsp.exe can reach a system the way SAP GUI does: over RFC with SNC
+and Kerberos, using SAP's own NetWeaver RFC library. No password, cookie or
+browser is involved, and no extra program: vsp runs itself as its own transport
+command (`vsp snc-serve`) and carries ADT over RFC (`SADT_REST_RFC_ENDPOINT`).
+The library is loaded from pure Go, so the build stays `CGO_ENABLED=0`.
+
+What you need:
+
+- **sapnwrfc.dll**, from the SAP NW RFC SDK 7.50 for Windows x64. Download it
+  from the SAP Software Center (an S-user with download rights is needed; search
+  for "SAP NW RFC SDK"). vsp never ships the DLL. Keep the SDK's `lib` folder
+  together: its other DLLs are loaded from beside `sapnwrfc.dll` (and from
+  System32), never from the working directory or `PATH`.
+- **The SNC library** SAP GUI uses, usually `gx64krb5.dll` (Kerberos).
+- **A SAP Logon entry** for the system with SNC switched on. vsp reads it from
+  SAPUILandscape.xml, including its `<Include>`s, and takes only the exact entry
+  you name.
+
+```json
+{
+  "systems": {
+    "dev": {
+      "snc": {
+        "dll": "C:\\SAP\\nwrfcsdk\\lib\\sapnwrfc.dll",
+        "snc_lib": "C:\\Program Files\\SAP\\FrontEnd\\SecureLogin\\lib\\gx64krb5.dll",
+        "connection": "DEV - Development",
+        "system": "DEV",
+        "client": "100",
+        "user": "TESTUSER",
+        "production": false
+      }
+    }
+  }
+}
+```
+
+```bash
+vsp -s dev search "ZCL_*"
+```
+
+`dll` and `snc_lib` may be left out: `dll` then means `sapnwrfc.dll` beside
+`vsp.exe`, and `snc_lib` the `SNC_LIB_64` variable that SAP GUI sets, read
+from the user's environment in the registry, then the machine's. It is not
+read from vsp's own process environment, which a project's `.env` feeds, and a
+`%VAR%` value is not expanded: name `snc_lib` then. `SNC_LIB` is not read; it
+names the 32-bit library, which a 64-bit `vsp.exe` cannot load.
+
+Optional keys: `landscape` (an absolute path to SAPUILandscape.xml; default: SAP
+GUI's own, via `SAPLOGON_LSXML_FILE` or `%APPDATA%\SAP\Common`),
+`logon_timeout` (default `45s`), `request_timeout` (default `60s`),
+`production` (required, see below), `allow_data_preview` (forward data preview SELECTs on
+a production system too) and `verbose` (one stderr line per request).
+
+- **Home directory only.** The `snc` block names a DLL that vsp loads, so it is
+  honoured only in `~/.vsp.json` or `~/.vsp/systems.json`, by the same rule as
+  `transport_cmd`. In a `.vsp.json` in the working directory it is refused.
+- **Windows only.** Elsewhere vsp refuses the block. On Linux or macOS, use
+  `transport_cmd` with an external helper instead.
+- **Exclusive.** It cannot be combined with `transport_cmd`, user/password,
+  cookies or `auth: sso`. vsp fills in the rest: `url` defaults to
+  `https://snc.invalid` (nothing connects to it), `client` comes from the block,
+  `expect` defaults to `SYSTEM.CLIENT/USER`, and the system is read-only.
+- **The identity is checked twice.** The logon is refused unless the
+  authenticated system, client and user match the block. vsp's own `expect`
+  check runs again on the first request. On a release without ADT's system
+  information resource, snc-serve answers it from the RFC logon's identity,
+  marked `X-Vsp-Snc-Identity: rfc-logon`, because the T000 fallback cannot
+  always tell the system ID.
+- **Read-only, stricter on production.** GET on an allowlist of ADT read
+  paths goes to SAP: discovery, repository, sources, DDIC, packages, transports
+  and dumps. `production` must be given, so a forgotten flag cannot open a
+  production system. With `"production": false`, a row-capped data
+  preview SELECT is also forwarded, but never one that names a credential
+  table. On a production system it is forwarded only with `allow_data_preview`.
+  vsp's own identity check (one row of T000, for releases without the system
+  information resource) is always forwarded. Everything else, including every
+  write, is answered 403 locally and never reaches SAP: the channel has no
+  stateful session and no locks. Cookies, credentials and session headers are
+  not forwarded.
+- **No retries.** A failed logon or RFC call stops the channel. Nothing is retried,
+  because a retried Kerberos or SNC failure gains nothing. Restart vsp.
+- **No logs on disk, no secrets in errors.** The SDK runs in a separate worker
+  process (vsp.exe again) whose working directory holds only a `sapnwrfc.ini`
+  that turns tracing off and is locked against file creation. Its stderr is
+  discarded. Errors carry RFC return codes and fixed stage names, never SAP's
+  message text, hosts or partner names.
+
+For the MCP server, name the system; it takes the logon, client, identity pin
+and read-only from the snc block, with the same checks as the CLI:
+
+```json
+{
+  "command": "C:\\tools\\vsp.exe",
+  "args": ["-s", "dev"]
+}
+```
+
+A URL, user, password or transport command given as well (flags or `SAP_*`)
+is refused rather than mixed in.
+
+From WSL, a Linux vsp can use the Windows build as its helper: the Windows
+process holds the Kerberos ticket of your Windows logon and reaches the
+network as Windows does. In `~/.vsp.json` on the Linux side:
+
+```json
+"dev": {
+  "url": "https://snc.invalid", "client": "100", "read_only": true,
+  "expect": "DEV.100/TESTUSER",
+  "transport_cmd": ["/mnt/c/tools/vsp.exe", "snc-serve",
+    "-system", "DEV", "-client", "100", "-user", "TESTUSER",
+    "-connection", "DEV - Development",
+    "-dll", "C:\\tools\\sapnwrfc.dll",
+    "-snc-lib", "C:\\Program Files\\SAP\\FrontEnd\\SecureLogin\\lib\\gx64krb5.dll"]
+}
+```
+
 <details>
 <summary><strong>MCP Server Configuration</strong></summary>
 
@@ -1512,7 +2143,7 @@ recovery down with it.
 vsp --url https://host:44300 --user admin --password secret
 vsp --url https://host:44300 --cookie-file cookies.txt
 vsp --url https://host:44300 --sso --sso-system dev   # browser SSO, self-refreshing
-vsp --mode expert          # Enable all 151 tools
+vsp --mode expert          # Enable all 148 tools
 vsp --mode hyperfocused    # Single SAP tool (~200 tokens instead of ~40K)
 ```
 
@@ -1549,6 +2180,51 @@ vsp -v slim '$ZDEMO'      # 0.01 s — [cache] 28 hits, 0 misses
 Something changed on the system by someone else within the TTL is the one
 case the cache cannot see; delete the file, or wait it out.
 
+### Pin the system, client and user (`--expect`)
+
+```bash
+vsp --expect A4H.001/DEVELOPER          # SID.CLIENT/USER
+export SAP_EXPECT=A4H.001               # or SID.CLIENT, or just SID
+```
+
+In `.vsp.json`, put it on a system: `"expect": "A4H.001/DEVELOPER"`.
+
+A pin turns a connection that lands in the wrong place into a clear refusal:
+
+- **Before any logon**, the configured user and client are compared with the
+  pin. A different user (for example, a stale `SAP_USER` in the shell) is
+  refused at startup, so its password never reaches SAP and never counts
+  toward a lock.
+- **On the first request**, vsp asks the system for its SID, client and user
+  (`/sap/bc/adt/core/http/systeminformation`; on older releases T000 and the
+  transport organizer). If they differ, vsp refuses that request and every
+  later one: `connected to B4H.001 as DEVELOPER, expected A4H.001/DEVELOPER`.
+  A cookie or SSO session's user is known only then, so it is checked then.
+- **If SAP refuses the password** during that check (401), vsp does not
+  retry, then or on any later request: one wrong password costs one failed
+  logon.
+- **After a re-authentication** (SSO refresh, reloaded cookie file), the new
+  session is checked again before the work that triggered it is retried.
+- **Classic RFC and the ZADT_VSP WebSocket** follow the same pin. An RFC user
+  that contradicts it (`rfc_user`, `--rfc-user` or a per-call `user`) never
+  dials the gateway. After RFC logon, `RFC_SYSTEM_INFO` must report the pinned
+  SID before any other call. A WebSocket opens only once the pin is confirmed,
+  and with the session that was verified. Under a pin, a 401 on the WebSocket
+  upgrade is not retried with the password.
+
+**Threat model:** the pin guards against misconfiguration: the wrong system,
+client or user from flags, the environment or `.vsp.json`, or a
+re-authentication that switches identity. It does not defend against a hostile
+SAP server. Cookies the verified server issues itself are covered by its verdict.
+
+`SAP()` shows the result (`pinned A4H.001/DEVELOPER ✓`). Without a pin,
+nothing changes and no extra request is sent.
+
+The MCP server takes its logon from flags and `SAP_*` only, not from
+`.vsp.json`. Its startup log names the source (`SAP logon: user DEVELOPER
+from SAP_USER (shell environment)`), and `vsp config show` lists the sources
+for the server and for CLI subcommands.
+
 ### .env File
 ```bash
 # .env (auto-loaded from current directory)
@@ -1563,16 +2239,19 @@ SAP_PASSWORD=secret
 | `--user` | `SAP_USER` | Username |
 | `--password` | `SAP_PASSWORD` | Password |
 | `--client` | `SAP_CLIENT` | Client (default: 001) |
+| `--expect` | `SAP_EXPECT` | Pin `SID[.CLIENT][/USER]`; refuse to work anywhere else (see above) |
 | `--mode` | `SAP_MODE` | `hyperfocused` (recommended), `focused`, or `expert` |
 | `--cookie-file` | `SAP_COOKIE_FILE` | Netscape cookie file |
 | `--sso` | `SAP_SSO` | Browser SSO; re-captures the session when it expires |
 | `--sso-system` | `SAP_SSO_SYSTEM` | Name for the cached session (default: URL host) |
 | `--sso-on-expiry` | `SAP_SSO_ON_EXPIRY` | `window` (default) or `error` when a sign-in is due |
-| `--insecure` | `SAP_INSECURE` | Skip TLS verification |
+| `--transport-cmd` + `--transport-arg` | `SAP_TRANSPORT_CMD` (JSON array) | Helper process that carries every ADT request over stdin/stdout and authenticates itself (see "Transport command") |
+| `--insecure` | `SAP_INSECURE` | Skip TLS verification. CLI subcommands on a `.vsp.json` system (`-s` or `default`) use that system's `insecure` setting instead, for ADT calls and the ZADT_VSP WebSocket alike |
 | `--terminal-id` | `SAP_TERMINAL_ID` | SAP GUI terminal ID for cross-tool debugging |
 | `--allow-transportable-edits` | `SAP_ALLOW_TRANSPORTABLE_EDITS` | Enable editing transportable objects |
 | `--allowed-transports` | `SAP_ALLOWED_TRANSPORTS` | Whitelist transports (wildcards: `A4HK*`) |
 | `--allowed-packages` | `SAP_ALLOWED_PACKAGES` | Whitelist packages (wildcards: `Z*,$TMP`) |
+| `--call-timeout` | `SAP_CALL_TIMEOUT` | Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, deploy, source write, activation) without its own `params.timeout`; 1–3600, 0 = none (each SAP request then limited to 60s). An invalid value stops startup |
 
 </details>
 
@@ -1710,7 +2389,7 @@ One axis, three values — `--mode` or `SAP_MODE`:
 
 ```mermaid
 graph LR
-    F["focused<br/>100 tools<br/>~14K tokens"] --> E["expert<br/>151 tools<br/>~40K tokens"]
+    F["focused<br/>98 tools<br/>~14K tokens"] --> E["expert<br/>148 tools<br/>~40K tokens"]
     E --> H["hyperfocused<br/>1 tool<br/>~200 tokens<br/><i>recommended</i>"]
     style H fill:#2d6a4f,color:#fff,stroke:#4ade80,stroke-width:2px
     style F fill:#264653,color:#fff
@@ -1719,7 +2398,7 @@ graph LR
 
 | Aspect | Focused | Expert | Hyperfocused (recommended) |
 |--------|:-:|:-:|:-:|
-| **Tools** | 100 essential | 151 complete | 1 universal `SAP()` |
+| **Tools** | 98 essential | 148 complete | 1 universal `SAP()` |
 | **Schema tokens** | ~14K | ~40K | **~200** |
 | **How AI calls it** | `GetSource(type, name)` | Same, + granular tools | `SAP(action, target, params)` |
 | **Documentation** | In tool schemas | In tool schemas | `SAP(action="help")` |
@@ -1728,8 +2407,8 @@ graph LR
 
 ```bash
 vsp --mode hyperfocused  # recommended — single SAP(action, target, params) tool
-vsp --mode focused       # 100 curated tools (individual tool names)
-vsp --mode expert        # all 151 tools individually
+vsp --mode focused       # 98 curated tools (individual tool names)
+vsp --mode expert        # all 148 tools individually
 ```
 
 ## DSL & Automation
@@ -1916,9 +2595,64 @@ ExecuteABAP:
     lv_result = lv_msg.
 ```
 
+Several values: call `RETURN_VALUE( x )` once per value (in addition to, or
+instead of, `lv_result`). Each value is handed back the moment it is returned,
+so a later `RETURN`, `CHECK` or exception does not lose it. `x` can be any data
+object: an elementary value comes back as text, a structure or table as JSON,
+a data reference as what it points to, and an object reference as
+`<object CLASS_NAME>`.
+
+The MCP tool (`execute_abap`) answers JSON. `result_text` is the returned value
+in full, unwrapped from SAP's `Critical Assertion Error: '…'`: a string for one
+value, an array for several. The other fields are `success`, `programName`,
+`output` (every value, in order), `executionTime`, `message`, `cleanedUp`,
+`failure` (when the code did not finish) and `rawAlerts` (only when no value
+came back). SAP turns a line break inside a value into `#`.
+
+```json
+{ "success": true, "programName": "ZTEMP_EXEC_12345678",
+  "output": ["20261001", "TESTUSER"], "result_text": ["20261001", "TESTUSER"],
+  "executionTime": 0.41,
+  "message": "Executed successfully, 2 output(s) returned", "cleanedUp": true }
+```
+
+`vsp execute` prints every value whole, one per line; `vsp execute --json`
+prints the same object as the MCP tool.
+
 **Risk levels:** `harmless` (read-only), `dangerous` (write), `critical` (full access)
 
 See [ExecuteABAP Report](reports/2025-12-05-004-execute-abap-implementation.md) for details.
+
+## ABAP Unit results
+
+`RunUnitTests` / `SAP(action="test")` answers JSON:
+
+```json
+{
+  "ok": false,
+  "counts": { "classes": 2, "methods": 3, "passed": 2, "failed": 1, "classFailures": 1, "warnings": 1, "notRun": 0 },
+  "classes": [ { "name": "LTC_CALC", "parentName": "ZCL_DEMO_CALC", "testMethods": [ ... ], ... } ]
+}
+```
+
+- `ok` is true when at least one test method ran, nothing failed and every test
+  class ran; a run in which no test method ran is not ok, and `note` says why.
+- A method fails on a failed assertion or an exception (or any critical/fatal
+  alert). Warnings are counted but do not fail it.
+- A test class with no test method and no failure of its own was not run (most
+  often ABAP Unit refused it for its risk level or duration). It is counted in
+  `notRun`, named in `notRunClasses`, and makes the run not ok, even when
+  another class passed. `vsp test` exits non-zero whenever `ok` is false.
+- `classes` keeps the fields it always had (name, parentName, testMethods with
+  name and alerts: kind, severity, title, details, stack; alerts filed on the
+  class itself, as CLASS_SETUP/CLASS_TEARDOWN failures are).
+- `"only_failures": true` lists only failed methods and classes with alerts of
+  their own, without URIs or stacks (`at` is where the alert was raised); the
+  counts still cover the whole run, so a green run is just `ok` + `counts`.
+- `include_dangerous` runs RISK LEVEL DANGEROUS/CRITICAL tests and is refused
+  under `--read-only`.
+
+CLI: `vsp test CLAS ZCL_X --only-failures`, `vsp test CLAS ZCL_X --json`.
 
 ## AI-Powered Root Cause Analysis
 
@@ -1945,7 +2679,7 @@ See [AI-Powered RCA Workflows](reports/2025-12-05-013-ai-powered-rca-workflows.m
 
 ## Tools Reference
 
-**Focused Mode Tools (100):**
+**Focused Mode Tools (98):**
 - **Search:** SearchObject, GrepObjects, GrepPackages
 - **Read:** GetSource, GetTable, GetTableContents, RunQuery, GetPackage, GetFunctionGroup, GetCDSDependencies
 - **Debugger:** DebuggerListen, DebuggerAttach, DebuggerDetach, DebuggerStep, DebuggerGetStack, DebuggerGetVariables, SetBreakpoint, GetBreakpoints, DeleteBreakpoint
@@ -1962,7 +2696,7 @@ See [AI-Powered RCA Workflows](reports/2025-12-05-013-ai-powered-rca-workflows.m
 - **Diagnostics:** GetDumps, GetDump, ListTraces, GetTrace, GetSQLTraceState, ListSQLTraces
 - **Git:** GitTypes, GitExport (requires abapGit on SAP)
 - **Reports:** RunReport, GetVariants, GetTextElements, SetTextElements
-- **Install:** InstallZADTVSP, InstallAbapGit, ListDependencies
+- **Install:** InstallZADTVSP, ListDependencies, DeployZip (abapGit install is CLI-only for now: `vsp install abapgit`; the MCP tool is being rebuilt, #277)
 
 See [README_TOOLS.md](README_TOOLS.md) for complete tool documentation.
 
@@ -2005,7 +2739,7 @@ See [README_TOOLS.md](README_TOOLS.md) for complete tool documentation.
 
 **vsp** is a Go rewrite with:
 - Single binary, zero dependencies
-- 151 tools (vs 13 original)
+- 148 tools (vs 13 original)
 - ~50x faster startup
 
 ## Optional: WebSocket Handler (ZADT_VSP)
@@ -2045,7 +2779,7 @@ See [WebSocket Handler Report](reports/2025-12-18-002-websocket-rfc-handler.md) 
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | Architecture diagrams (Mermaid) |
-| [README_TOOLS.md](README_TOOLS.md) | Complete tool reference (151 tools) |
+| [README_TOOLS.md](README_TOOLS.md) | Complete tool reference (148 tools) |
 | [MCP_USAGE.md](MCP_USAGE.md) | AI agent usage guide |
 | [docs/DSL.md](docs/DSL.md) | DSL & workflow documentation |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Technical architecture (detailed) |
@@ -2074,12 +2808,83 @@ Uses **ABAP SQL syntax**, not standard SQL:
 ```bash
 # Build
 make build          # Current platform
-make build-all      # All 9 platforms
+make build-all      # Common 3 platforms (build-all-all: all 6)
 
 # Test (go.mod pins toolchain go1.26.8)
 go test ./...                              # Unit tests (1354)
 go test -tags=integration -v ./pkg/adt/    # Integration tests (34+)
+
+# Lint and metrics, as CI runs them
+make lint                                  # correctness linters, new code since origin/main
+make lint-full                             # every linter, whole tree (advisory debt count)
+make metrics                               # size and complexity, as in the PR report
 ```
+
+**What CI blocks on.** Build, vet, tests, and the `lint` gate are blocking. The
+gate runs correctness linters (errcheck, govet, staticcheck SA, unused,
+ineffassign) on new code only. Complexity, size and style are never red in CI:
+the PR report shows them as advisory drift.
+
+**Opt-in pre-push hook.** It runs the same gate before a push, using the pinned
+golangci-lint version from `.github/workflows/ci.yml`, and blocks on a finding.
+It also warns, in yellow, about new or changed functions over the complexity
+thresholds (cyclomatic 30, cognitive 40, 150 lines). Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2   # if not installed
+```
+
+Skip it for one push with `git push --no-verify`.
+
+**Leak scan.** This repository is public, and agents capture raw answers from
+live SAP systems. The `leak scan` job in CI and the first step of the pre-push
+hook block on live identifiers and secrets in what a change adds: SAP session
+and SSO cookies, `Authorization: Basic` headers, CSRF token values, private
+addresses, and passwords in `.vsp.json`/`.mcp.json`-style config, plus the
+host names, addresses, SIDs and user names on a private list. The scanner
+(`.github/ci/leakscan`) decodes UTF-16LE, hex and base64 before it matches, and
+prints only `file:line` and the class that matched, never the value. It reads
+every commit of a push or pull request, not just its last state: a value one
+commit added and a later one deleted is still in the history, and blocks.
+
+The list of names is never committed. Seed it once per clone, one value per
+line, optionally `class: value`:
+
+```bash
+mkdir -p .local && cat > .local/leak-identifiers.txt <<'EOF'
+host: <your SAP host name>
+ip:   <its address>
+sid:  <its SID, if it is not a public one>
+user: <your SAP user name>
+EOF
+chmod 600 .local/leak-identifiers.txt    # .local/ is gitignored
+```
+
+Leave out a SID that is public anyway, such as the `A4H` of SAP's developer
+edition: it is all over this repository's docs, and a gate on it would block
+every change to them. A private system's SID belongs on the list.
+
+Without the file the hook still runs the generic patterns and warns that the
+names were not checked. A reviewed false positive of a generic pattern goes in
+`.github/ci/leakscan-allow.txt`, with a reason on every line; a name from the
+list can never be excused. CI reads that file from the base branch, so a new
+rule takes effect only once merged: propose it in a pull request of its own.
+
+A force push to main is refused by the repository's ruleset, so a push scan
+always has a previous tip to start from. If one ever got through, the job is
+red (the replaced commits cannot be told from the new ones), and the recovery
+is a maintainer scanning the rewritten history by hand with
+`-range <last trusted commit>..<new tip>`. Known limitation: a pull request from a branch of
+this repository runs its own copy of the workflow and the scanner, so it could
+weaken the gate it is judged by. Branch protection would close that and this
+repository does not use it, so the job warns, and the report row says so,
+whenever a pull request touches `.github/workflows/ci.yml`,
+`.github/ci/leakscan/` or `.githooks/pre-push`: review those changes as
+changes to the gate. In CI the
+list is the `VSP_LEAK_IDENTIFIERS` secret: a pull request from a fork has no
+secrets, so it gets the generic patterns only and the report row says
+"PARTIAL"; on this repository's own branches and on main a missing list is red.
 
 <details>
 <summary><strong>Architecture</strong></summary>
@@ -2105,9 +2910,9 @@ vibing-steampunk/
 
 | Metric | Value |
 |--------|-------|
-| **Tools** | 151 expert, 100 focused, 1 universal |
+| **Tools** | 148 expert, 98 focused, 1 universal |
 | **Unit Tests** | 1354 (`go test ./... -list '.*'`; integration tests excluded by build tag) |
-| **Platforms** | 9 (Linux, macOS, Windows × amd64/arm64/386) |
+| **Platforms** | 6 (Linux, macOS, Windows × amd64/arm64) |
 
 <details>
 <summary><strong>Roadmap</strong></summary>

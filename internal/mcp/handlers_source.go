@@ -39,6 +39,12 @@ func (s *Server) routeSourceAction(ctx context.Context, action, objectType, obje
 			if v, ok := getBoolParam(params, "include_hash"); ok {
 				args["include_hash"] = v
 			}
+			if v, ok := getBoolParam(params, "summary"); ok {
+				args["summary"] = v
+			}
+			if v := getStringParam(params, "if_none_match"); v != "" {
+				args["if_none_match"] = v
+			}
 			if v, ok := getFloatParam(params, "max_deps"); ok {
 				args["max_deps"] = v
 			}
@@ -77,9 +83,19 @@ func (s *Server) routeSourceAction(ctx context.Context, action, objectType, obje
 				if v := getStringParam(params, "expected_source_hash"); v != "" {
 					args["expected_source_hash"] = v
 				}
+				// CLAS only: the include to write instead of the main source.
+				// Forwarded, never dropped, so WriteSource can route it or
+				// refuse it (#242).
+				if v := getStringParam(params, "include"); v != "" {
+					args["include"] = v
+				}
 				// FUNC only: the group, when the caller happens to know it.
 				if v := getStringParam(params, "parent"); v != "" {
 					args["parent"] = v
+				}
+				// The call's budget; longCall reads and checks it.
+				if v, ok := params["timeout"]; ok {
+					args["timeout"] = v
 				}
 				return s.callHandler(ctx, s.handleWriteSource, args)
 			}
@@ -124,7 +140,13 @@ func (s *Server) registerGetSource() {
 			mcp.Description("Maximum dependencies to resolve when include_context=true (default: 20)"),
 		),
 		mcp.WithBoolean("include_hash",
-			mcp.Description("Return JSON with the raw source and its sourceHash for a guarded later write. Default false preserves the text response."),
+			mcp.Description("Return JSON with the raw source, its sourceHash for a guarded later write, and its sha256 for a later if_none_match. Default false preserves the text response."),
+		),
+		mcp.WithBoolean("summary",
+			mcp.Description("Return JSON metadata instead of the source: objectType, name, uri, lines, bytes, sha256 (hex SHA-256 of the exact source text, not normalised) and sourceHash. Same single read, no body, no dependency context."),
+		),
+		mcp.WithString("if_none_match",
+			mcp.Description("The sha256 of a source read earlier (from summary=true). If the source still has it, return a one-line \"unchanged: source sha256 ...\" instead of the body; otherwise the normal read. Compares the object's own source only, not the dependency context."),
 		),
 	), s.handleGetSource)
 }
@@ -166,6 +188,12 @@ func (s *Server) registerWriteSource() {
 		mcp.WithString("expected_source_hash",
 			mcp.Description("Optional sourceHash returned by GetSource(include_hash=true). After locking, refuse the write if SAP source has changed."),
 		),
+		mcp.WithString("include",
+			mcp.Description("For CLAS only: write this include of an existing class instead of the main source: definitions, implementations, macros, testclasses (created if missing). Any other name is refused."),
+		),
+		mcp.WithNumber("timeout",
+			mcp.Description(callTimeoutDescription),
+		),
 	), s.handleWriteSource)
 }
 
@@ -191,18 +219,56 @@ func (s *Server) handleGetSource(ctx context.Context, request mcp.CallToolReques
 		Method:  method,
 	}
 
-	rawSource, err := s.adtClient.GetSource(ctx, objectType, name, opts)
+	summary, _ := request.GetArguments()["summary"].(bool)
+	ifNoneMatch := ""
+	if v, _ := request.GetArguments()["if_none_match"].(string); strings.TrimSpace(v) != "" {
+		// Checked before the read: a malformed digest costs no round trip.
+		d, err := adt.ParseIfNoneMatch(v)
+		if err != nil {
+			return newToolResultError(err.Error()), nil
+		}
+		ifNoneMatch = d
+	}
+
+	readCtx := ctx
+	if summary || ifNoneMatch != "" {
+		// The point of both is the current state: a cached body up to the
+		// cache TTL old would say "unchanged" about an object another
+		// client changed. This read goes to SAP and refreshes the cache.
+		readCtx = adt.WithFreshReads(ctx)
+	}
+	rawSource, readURI, err := s.adtClient.GetSourceWithURI(readCtx, objectType, name, opts)
 	if err != nil {
 		return newToolResultError(fmt.Sprintf("GetSource failed: %v", err)), nil
 	}
-	source := rawSource
-	contextPrologue := ""
 
 	// Append dependency context (default: true, set include_context=false to disable)
 	includeContext := true
 	if ic, ok := request.GetArguments()["include_context"].(bool); ok {
 		includeContext = ic
 	}
+
+	// Summary and if_none_match answer from the text just read, before the
+	// dependency context, which would cost a round trip per dependency. So
+	// if_none_match compares the object's own source only, never the
+	// context, and its answer says so.
+	if summary || ifNoneMatch != "" {
+		sum := adt.SummarizeSource(objectType, name, opts, readURI, rawSource)
+		unchanged := ifNoneMatch != "" && ifNoneMatch == sum.SHA256
+		if summary {
+			if ifNoneMatch != "" {
+				sum.Unchanged = &unchanged
+			}
+			output, _ := json.MarshalIndent(sum, "", "  ")
+			return mcp.NewToolResultText(string(output)), nil
+		}
+		if unchanged {
+			return mcp.NewToolResultText(adt.SourceUnchangedText(sum, includeContext)), nil
+		}
+	}
+	source := rawSource
+	contextPrologue := ""
+
 	if includeContext {
 		maxDeps := 20
 		if md, ok := request.GetArguments()["max_deps"].(float64); ok && md > 0 {
@@ -224,6 +290,9 @@ func (s *Server) handleGetSource(ctx context.Context, request mcp.CallToolReques
 		payload := map[string]string{
 			"source":     rawSource,
 			"sourceHash": adt.SourceHash(rawSource),
+			// The digest if_none_match takes, so a full read can be
+			// followed by cheap "has it changed?" reads.
+			"sha256": adt.SourceSHA256(rawSource),
 		}
 		if contextPrologue != "" {
 			payload["context"] = contextPrologue
@@ -235,8 +304,16 @@ func (s *Server) handleGetSource(ctx context.Context, request mcp.CallToolReques
 	return mcp.NewToolResultText(source), nil
 }
 
-// handleWriteSource handles the unified WriteSource tool call
+// handleWriteSource handles the unified WriteSource tool call. It is a long
+// call: the PUT of a large source and its activation can run past the
+// client's 60s per-request timeout, and the call's budget (params.timeout or
+// --call-timeout) is what bounds them instead.
 func (s *Server) handleWriteSource(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "WriteSource", s.writeSource)
+}
+
+// writeSource is handleWriteSource without the call budget (see longCall).
+func (s *Server) writeSource(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	objectType, ok := request.GetArguments()["object_type"].(string)
 	if !ok || objectType == "" {
 		return newToolResultError("object_type is required"), nil
@@ -260,6 +337,7 @@ func (s *Server) handleWriteSource(ctx context.Context, request mcp.CallToolRequ
 	method, _ := request.GetArguments()["method"].(string)
 	parent, _ := request.GetArguments()["parent"].(string)
 	expectedSourceHash, _ := request.GetArguments()["expected_source_hash"].(string)
+	include, _ := request.GetArguments()["include"].(string)
 
 	opts := &adt.WriteSourceOptions{
 		Description:        description,
@@ -269,6 +347,7 @@ func (s *Server) handleWriteSource(ctx context.Context, request mcp.CallToolRequ
 		Transport:          transport,
 		Method:             method,
 		ExpectedSourceHash: expectedSourceHash,
+		Include:            include,
 	}
 
 	if mode != "" {
@@ -364,6 +443,9 @@ func (s *Server) registerImportFromFile() {
 		),
 		mcp.WithString("expected_source_hash",
 			mcp.Description("Optional sourceHash returned by GetSource(include_hash=true). Refuse an existing-object import if SAP source has changed."),
+		),
+		mcp.WithNumber("timeout",
+			mcp.Description(callTimeoutDescription),
 		),
 	), s.handleDeployFromFile) // Reuse existing handler
 }

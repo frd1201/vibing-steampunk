@@ -1,136 +1,176 @@
 # Celebrate Milestone Release
 
-You are celebrating a project milestone! Follow these steps to create a new release:
+You are celebrating a project milestone. **Releases are cut by CI:** push the
+tag, `.github/workflows/release.yml` does the rest, and you check what it did.
+The manual path at the end is the fallback for when CI cannot run.
+
+Why CI, in one paragraph: every manual release so far has had to be checked by
+hand for the same things. v2.58.0 almost shipped six binaries of the previous
+release (`build-all` builds three platforms). A binary built before the tag says
+`v2.57.0-25-g977f968`. v2.58.0 and v2.59.0 went out without `LICENSE`/`NOTICE`.
+v2.59.0's binaries record a Go VCS stamp of a modified checkout of another
+branch, not the tag. The workflow builds from a clean checkout of the tag and
+refuses all of those, by reading the files instead of trusting exit codes.
 
 ## 1. Gather Release Information
 
 Ask the user for:
-- **Version number** (e.g., v1.2.0) - suggest based on changes (major/minor/patch)
-- **Release title** (e.g., "CLI & Cookie Authentication")
-- **Key highlights** to include in release notes
+- **Version number** (e.g., v2.60.0) — suggest based on changes (major/minor/patch)
+- **Release title** (e.g., "only what you saw") — it goes into the tag message
+- **Key highlights** — they go into the README, which becomes the release notes
 
-## 2. Pre-Release Checklist
+## 2. Release-prep PR (everything the tag should contain)
 
-Run these checks and report results:
+On a branch, in one PR:
 
-```bash
-# Run all unit tests
-go test ./...
+- **README.md "What's New"**: add `### vX.Y.Z — new since vA.B.C` (and, if any,
+  `### vX.Y.Z — behaviour changes since vA.B.C`). Every `### vX.Y.Z …` section
+  there becomes the release notes, verbatim. Without one, CI falls back to
+  git-cliff's commit list and warns.
+- **CHANGELOG.md**: `git-cliff --tag vX.Y.Z -o CHANGELOG.md` (git-cliff 2.12.0,
+  `uvx git-cliff` works). CI no longer pushes this to main after the fact, so
+  it lands here, reviewed, and inside the tag.
+- README/CLAUDE.md version references, if any.
 
-# Check for uncommitted changes
-git status
+Before merging: `go test ./...`, and the leak scan runs in CI on the PR.
 
-# Verify the sensitive files are not tracked.
-# (Grepping all of history for the word "password" was the old check here. On a
-# repo this size it takes minutes and returns mostly comments and field names,
-# so it got skimmed — a check nobody reads is not a check.)
-for f in .env cookies.txt .mcp.json; do
-  git ls-files --error-unmatch "$f" >/dev/null 2>&1 \
-    && echo "DANGER: $f is tracked" || echo "ok: $f not in the index"
-done
+## 3. Tag and push the tag
 
-# And scan the staged diff for the identifier families the sanitize policy names
-git diff --cached | grep -nE \
-  '\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b|\b[A-Z][0-9]{2}K[0-9]{6}\b|\bDEVK[0-9]{6,}\b'
-```
-
-## 3. Update Documentation
-
-If needed, update:
-- README.md - version references, feature list
-- CLAUDE.md - project status metrics
-- reports/vsp-status.md - if exists
-
-## 4. Commit & Push
+After the PR is merged, on an up-to-date `main`:
 
 ```bash
-# Stage and commit any pending changes
-git add -A
-git commit -m "Prepare release vX.Y.Z"
-
-# Push to origin
-git push origin main
-```
-
-## 5. Create Git Tag — BEFORE building
-
-The tag has to exist first. `LDFLAGS` takes the version from `git describe`, so
-a binary built before the tag reports the PREVIOUS release: someone downloading
-v2.58.0 runs `vsp --version` and is told `v2.57.0-25-g977f968`. Tag, then build.
-
-```bash
+git switch main && git pull --ff-only
 git tag -a vX.Y.Z -m "Release vX.Y.Z: <title>"
 git push origin vX.Y.Z
 ```
 
-## 6. Build All Platforms
+The tag subject after `vX.Y.Z: ` becomes the release title (`vX.Y.Z: <title>`).
+Push **only the tag**; CI pushes nothing anywhere.
 
-**`build-all-all`, not `build-all`.** `build-all` builds only `PLATFORMS_COMMON`
-— linux-amd64, darwin-arm64, windows-amd64. The other six are left at whatever
-they were, so a release assembled after it ships stale binaries under a new
-version number, and nothing about them looks wrong from the outside.
+### LTS (release/X.Y)
 
-```bash
-rm -f build/vsp-* build/checksums.txt   # so a stale one cannot survive
-make build-all-all
-```
-
-Then verify, rather than trusting the timestamps:
+v2.59.x is an LTS line: its patches are cut from `release/2.59`, not main. A
+patch is a fix that has landed on main, carried over with `cherry-pick -x` (the
+`(cherry picked from commit …)` line names the main commit), plus the notes:
 
 ```bash
-ls build/vsp-*                                    # expect 9 + the local alias
-./build/vsp-linux-amd64 --version                 # must print vX.Y.Z exactly
-./build/vsp-linux-amd64 <a command added this release> --help   # the feature is really in there
-
-cd build && sha256sum vsp-linux-* vsp-darwin-* vsp-windows-* > checksums.txt
+git fetch origin
+git switch -c lts/vX.Y.Z origin/release/X.Y
+git cherry-pick -x <main-sha>...               # each fix, oldest first
+# README.md "What's New": add `### vX.Y.Z` (e.g. `### v2.59.2`) on this branch;
+# that section is the release notes. CHANGELOG.md as usual.
+# PR into release/X.Y (not main); after it is merged:
+git switch release/X.Y && git pull --ff-only   # a local branch tracking origin/release/X.Y
+git tag -a vX.Y.Z -m "Release vX.Y.Z: <title>"
+git push origin vX.Y.Z                         # only the tag
 ```
 
-## 7. Create GitHub Release
+- `prepare` accepts a tag on `origin/main`, or on exactly one
+  `origin/release/X.Y` whose X.Y is the tag's major.minor. A v2.60.x on
+  release/2.59, or a v2.59.x only on some other branch, is refused; the error
+  lists the branches checked (`.github/ci/release.sh on-branch vX.Y.Z` says the
+  same locally after a `git fetch origin`).
+- The gates (test, leak scan, build, run, publish) run on the tag's commit,
+  with the `release.sh` in it: an LTS release ships the platform set its own
+  line ships.
+- A tag push runs `release.yml` as it is at the tag. If `release/X.Y` predates
+  the LTS rule (`release.sh on-branch`), that run is refused before anything
+  is built; run it from main instead:
+  `gh workflow run release.yml --ref main -f tag=vX.Y.Z`.
+- `workflow_dispatch` is accepted only from `main` or a `release/X.Y` branch
+  (checked in the workflow before any checked-out code runs), and a
+  dispatched prepare takes `release.sh on-branch` from main, never from the
+  dispatched branch.
+- Latest: an LTS patch is marked latest only if it is above every published
+  final release, so v2.59.2 after v2.60.0 is never latest and `vsp update`
+  keeps offering v2.60.x. Publish jobs run one at a time across all tags
+  (concurrency group `release-publish`) and decide latest right before going
+  public, so two releases at once cannot both end up latest. GitHub keeps one
+  pending job per group: a third queued publish is cancelled (nothing goes
+  public); dispatch it again.
 
-Use `gh release create` with:
-- All binaries from `build/`
-- Release notes highlighting key features
-- Mark as latest release
+## 4. What CI does
+
+`release.yml`, on the tag push (or `gh workflow run release.yml -f tag=vX.Y.Z`
+for an existing tag that has no release yet):
+
+1. **prepare**: tag format, tag commit is on `main` (or, for an LTS patch, on
+   its own `release/X.Y`), no release exists for it.
+2. **test**: `go test -race ./...` at the tag.
+3. **leak scan**: the tag's tree and the commits since the previous tag, with
+   the `VSP_LEAK_IDENTIFIERS` list (fails closed without it).
+4. **build and verify** (`.github/ci/release.sh`): six binaries + `checksums.txt`
+   + `LICENSE` + `NOTICE`, then by content:
+   - exactly that file set, nothing stale;
+   - each executable header is the platform its name says (ELF/Mach-O/PE + arch);
+   - Go's build info in each binary: GOOS/GOARCH, `vcs.revision` = the
+     tag commit, `vcs.modified=false`, `main.Version` = the tag;
+   - `checksums.txt` has exactly the six lines and every one matches;
+   - `--version` prints exactly `vsp version vX.Y.Z (commit: <sha>, …)` for
+     linux amd64, and arm64 under qemu.
+5. **run**: the same `--version` check on macOS (darwin-arm64; darwin-amd64 if
+   Rosetta is there, else a warning) and Windows (amd64; arm64 on a
+   Windows ARM runner).
+6. **publish**: notes from the README (else git-cliff), release created as a
+   **draft**, every asset downloaded back and compared byte for byte. Just
+   before and after publishing, the tag on origin must still be the built
+   commit and every asset's GitHub sha256 digest must match the build; if the
+   check after publishing fails, the release goes back to draft. It is marked
+   latest only above every published final release.
+
+## 5. What to check
 
 ```bash
-gh release create vX.Y.Z \
-  build/vsp-linux-amd64 \
-  build/vsp-linux-arm64 \
-  build/vsp-linux-386 \
-  build/vsp-linux-arm \
-  build/vsp-darwin-amd64 \
-  build/vsp-darwin-arm64 \
-  build/vsp-windows-amd64.exe \
-  build/vsp-windows-arm64.exe \
-  build/vsp-windows-386.exe \
-  --title "vX.Y.Z: <title>" \
-  --notes "$(cat <<'NOTES'
-## What's New
-
-- Feature 1
-- Feature 2
-
-## Downloads
-
-| Platform | Architecture | File |
-|----------|--------------|------|
-| Linux | x64 | vsp-linux-amd64 |
-| Linux | ARM64 | vsp-linux-arm64 |
-| macOS | x64 | vsp-darwin-amd64 |
-| macOS | Apple Silicon | vsp-darwin-arm64 |
-| Windows | x64 | vsp-windows-amd64.exe |
-
-## Installation
-
-Download the appropriate binary, make it executable, and add to your PATH.
-
-## Full Changelog
-
-See commits since last release.
-NOTES
-)"
+gh run watch                                   # or: gh run list --workflow release.yml -L 1
+gh release view vX.Y.Z --json name,isDraft,assets -q '.name, .isDraft, [.assets[].name]'
 ```
 
-## 8. Celebrate!
+- 9 assets: 6 `vsp-*`, `checksums.txt`, `LICENSE`, `NOTICE`; not a draft.
+- Read the run's warnings: README section missing, CHANGELOG section missing,
+  darwin-amd64 not executed. None blocks; each is something to know.
+- One look from outside, on your own platform:
 
-Report the release URL and summary of what was shipped!
+```bash
+vsp update --check                              # an older vsp sees the new release
+gh release download vX.Y.Z -p "vsp-$(go env GOOS)-$(go env GOARCH)*" -D /tmp/vsp-new
+chmod +x /tmp/vsp-new/vsp-* && /tmp/vsp-new/vsp-* --version
+/tmp/vsp-new/vsp-* <a command added this release> --help   # the feature is really in there
+```
+
+The release body is the README section; edit it on GitHub afterwards if a
+shorter summary reads better (v2.59.0's was hand-condensed).
+
+**If a run fails**: nothing is public. Fix the cause; if a draft was left
+behind, delete the draft (never the tag, never a published release), then
+`gh workflow run release.yml -f tag=vX.Y.Z`. If the fix needs a code change,
+it is a new tag (vX.Y.Z+1): a pushed tag is never moved.
+
+## 6. Fallback: manual release (CI unavailable)
+
+Same script, same checks, run by hand. Do it in a **fresh worktree of the tag**
+— the script refuses a dirty tree or a HEAD that is not the tag, which is
+exactly what went wrong with v2.59.0's build stamp.
+
+```bash
+git worktree add .local/worktrees/release-vX.Y.Z vX.Y.Z
+cd .local/worktrees/release-vX.Y.Z
+make release-dist TAG=vX.Y.Z           # build + verify + run this platform's binary
+./.github/ci/release.sh notes vX.Y.Z /tmp/notes.md
+
+pre=(); case vX.Y.Z in *-*) pre=(--prerelease) ;; esac
+./.github/ci/release.sh tag-at vX.Y.Z "$(git rev-parse 'vX.Y.Z^{commit}')"
+gh release create vX.Y.Z --draft --verify-tag "${pre[@]}" \
+  --title "vX.Y.Z: <title>" --notes-file /tmp/notes.md dist/*
+gh release download vX.Y.Z -D /tmp/served
+./.github/ci/release.sh compare dist /tmp/served
+./.github/ci/release.sh publish vX.Y.Z "$(git rev-parse 'vX.Y.Z^{commit}')" dist   # the same guarded publish CI runs
+
+cd - && git worktree remove .local/worktrees/release-vX.Y.Z
+```
+
+`make build-all-all` still exists for development builds; it is not a release
+build (no ReleaseRepo stamp, version from `git describe`, no checks).
+
+## 7. Celebrate!
+
+Report the release URL and a summary of what was shipped!

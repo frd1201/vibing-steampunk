@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/oisee/vibing-steampunk/pkg/cache"
 	"os"
@@ -44,6 +45,10 @@ type systemParams struct {
 	CookieFile   string
 	CookieString string
 
+	// TransportCmd is the argv of a helper that carries every ADT request
+	// over its stdin/stdout and authenticates on its own.
+	TransportCmd []string
+
 	// Auth names the authentication method ("sso" for browser single sign-on).
 	Auth string
 	// SSO carries this system's single sign-on settings, if any.
@@ -74,6 +79,11 @@ type systemParams struct {
 
 	Cache     bool
 	CachePath string
+
+	// Expect pins the identity (SID[.CLIENT][/USER]); ExpectSource says where
+	// the pin came from. Empty: no pin, and no preflight request.
+	Expect       string
+	ExpectSource string
 }
 
 // resolveSystemParams resolves system parameters from --system flag or env vars.
@@ -112,9 +122,11 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 
 		// Require some way to authenticate. An SSO system needs no stored
 		// credential at all: the browser handshake produces one on demand.
+		// A transport command authenticates on its own (GetSystem has
+		// refused it next to any credential, and outside the home directory).
 		hasCookieAuth := sys.CookieFile != "" || sys.CookieString != ""
-		if sys.Password == "" && !hasCookieAuth && !sys.UsesSSO() {
-			return nil, fmt.Errorf("auth not found for system '%s'. Set VSP_%s_PASSWORD env var, use cookie_file/cookie_string, or set \"auth\": \"sso\"", effectiveName, strings.ToUpper(effectiveName))
+		if sys.Password == "" && !hasCookieAuth && !sys.UsesSSO() && len(sys.TransportCmd) == 0 {
+			return nil, fmt.Errorf("auth not found for system '%s'. Set VSP_%s_PASSWORD env var, use cookie_file/cookie_string, set \"auth\": \"sso\", or set transport_cmd in ~/.vsp.json", effectiveName, strings.ToUpper(effectiveName))
 		}
 
 		verbose, _ := cmd.Flags().GetBool("verbose")
@@ -127,6 +139,10 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		if err != nil {
 			return nil, err
 		}
+		expect, expectSource := cliExpect(sys.Expect)
+		if expectSource == ".vsp.json" {
+			expectSource = fmt.Sprintf(".vsp.json system %q", effectiveName)
+		}
 
 		return &systemParams{
 			Name:               effectiveName,
@@ -138,6 +154,7 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			Insecure:           sys.Insecure,
 			CookieFile:         sys.CookieFile,
 			CookieString:       sys.CookieString,
+			TransportCmd:       sys.TransportCmd,
 			Auth:               sys.Auth,
 			SSO:                sys.SSO,
 			TransportAttribute: sys.TransportAttribute,
@@ -154,6 +171,8 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 			BlockFreeSQL:            sys.BlockFreeSQL || envFlag("SAP_BLOCK_FREE_SQL"),
 			Cache:                   sys.Cache,
 			CachePath:               sys.CachePath,
+			Expect:                  expect,
+			ExpectSource:            expectSource,
 		}, nil
 	}
 
@@ -165,8 +184,18 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 
 	user := os.Getenv("SAP_USER")
 	password := os.Getenv("SAP_PASSWORD")
-	if user == "" || password == "" {
-		return nil, fmt.Errorf("SAP_USER and SAP_PASSWORD required")
+	transportCmd, err := resolveTransportCmd(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if len(transportCmd) > 0 {
+		// The helper authenticates; credentials of ours are refused, not
+		// silently dropped.
+		if user != "" || password != "" {
+			return nil, fmt.Errorf("%w (found: SAP_USER/SAP_PASSWORD)", adt.ErrTransportCmdAuth)
+		}
+	} else if user == "" || password == "" {
+		return nil, fmt.Errorf("SAP_USER and SAP_PASSWORD required (or SAP_TRANSPORT_CMD)")
 	}
 
 	cacheEnabled := strings.EqualFold(os.Getenv("VSP_CACHE"), "true")
@@ -179,11 +208,13 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 	if err != nil {
 		return nil, err
 	}
+	envExpect, envExpectSource := cliExpect("")
 
 	return &systemParams{
 		URL:                url,
 		User:               user,
 		Password:           password,
+		TransportCmd:       transportCmd,
 		Client:             getEnvOrDefault("SAP_CLIENT", "001"),
 		Language:           getEnvOrDefault("SAP_LANGUAGE", "EN"),
 		Insecure:           os.Getenv("SAP_INSECURE") == "true",
@@ -203,6 +234,8 @@ func resolveSystemParams(cmd *cobra.Command) (*systemParams, error) {
 		BlockFreeSQL:            envFlag("SAP_BLOCK_FREE_SQL"),
 		Cache:                   cacheEnabled,
 		CachePath:               cachePath,
+		Expect:                  envExpect,
+		ExpectSource:            envExpectSource,
 	}, nil
 }
 
@@ -313,6 +346,21 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 		adt.WithLanguage(params.Language),
 	}
 
+	// The identity pin. The user a password logon would send is checked here,
+	// so a wrong one is refused before it ever reaches SAP; a cookie or single
+	// sign-on session has no user name until the system says it.
+	basicUser := params.User
+	if params.UsesSSO() || params.CookieFile != "" || params.CookieString != "" || len(params.TransportCmd) > 0 {
+		basicUser = ""
+	}
+	pinOpt, err := cliPinOption(params, basicUser)
+	if err != nil {
+		return nil, err
+	}
+	if pinOpt != nil {
+		opts = append(opts, pinOpt)
+	}
+
 	// Carry the system's declared safety into the client. Without this a
 	// read_only system is only read-only when the MCP server is talking; every
 	// CLI subcommand wrote happily, which is the opposite of what the setting
@@ -388,6 +436,18 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 		}
 	}
 
+	// A transport command: the helper carries every request and
+	// authenticates, so vsp sends no credentials of its own.
+	if len(params.TransportCmd) > 0 {
+		if params.User != "" || params.Password != "" || params.CookieFile != "" || params.CookieString != "" || params.UsesSSO() {
+			return nil, adt.ErrTransportCmdAuth
+		}
+		opts = append(opts, adt.WithTransportCmd(params.TransportCmd))
+		client := adt.NewClient(params.URL, "", "", opts...)
+		trackTransportCmd(client.CloseTransport)
+		return client, nil
+	}
+
 	// Browser single sign-on: cookies are fetched on demand and refreshed
 	// automatically, so this is checked before the static cookie sources.
 	if params.UsesSSO() {
@@ -442,45 +502,25 @@ func buildClient(params *systemParams) (*adt.Client, error) {
 	return adt.NewClient(params.URL, params.User, params.Password, opts...), nil
 }
 
-// systemCookies returns the browser session a system authenticates with, if it
-// uses one. A system on a password has none, and that is not an error.
-func systemCookies(ctx context.Context, params *systemParams) (map[string]string, error) {
-	switch {
-	case params.UsesSSO():
-		provider, err := newSSOProvider(params)
-		if err != nil {
-			return nil, err
-		}
-		return provider.Cookies(ctx)
-	case params.CookieFile != "":
-		return adt.LoadCookiesFromFile(params.CookieFile)
-	case params.CookieString != "":
-		return adt.ParseCookieString(params.CookieString), nil
-	}
-	return nil, nil
-}
-
-// getWSClient creates an AMDP WebSocket client for GitExport.
+// getWSClient creates an AMDP WebSocket client for GitExport, authenticated as
+// the system's ADT client is: its cookie_file, cookie_string or single sign-on
+// session, or its password when it has none.
+//
+// The ADT client exists only to derive the WebSocket's credentials, so it is
+// built without the response cache: with a cache_path that would open a
+// SQLite store nothing here uses or closes.
 func getWSClient(ctx context.Context, params *systemParams) (*adt.AMDPWebSocketClient, error) {
-	// NewAMDPWebSocketClient(baseURL, client, user, password, insecure)
-	wsClient := adt.NewAMDPWebSocketClient(
-		params.URL,
-		params.Client,
-		params.User,
-		params.Password,
-		params.Insecure,
-	)
-
-	// A system reached through single sign-on has no password to offer, and the
-	// upgrade request carries a cookie as readily as any other.
-	cookies, err := systemCookies(ctx, params)
+	noCache := *params
+	noCache.Cache, noCache.CachePath = false, ""
+	client, err := buildClient(&noCache)
 	if err != nil {
 		return nil, err
 	}
-	if len(cookies) > 0 {
-		wsClient.SetCookies(cookies)
+	// The WebSocket logs on by itself; the pin is checked over ADT first.
+	if err := client.VerifyIdentity(ctx); err != nil {
+		return nil, err
 	}
-
+	wsClient := client.NewAMDPWebSocketClient()
 	if err := wsClient.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("failed to connect WebSocket: %w", err)
 	}
@@ -555,9 +595,18 @@ var searchCmd = &cobra.Command{
 	Short: "Search for ABAP objects",
 	Long: `Search for ABAP objects by name pattern.
 
+With --exact the query is a name, not a pattern: only objects whose name
+equals it (case-insensitive) are listed, still filtered by --type and --max.
+The name is sent without a wildcard, which the quick search matches whole.
+On a release that reads it as a prefix, at most 1000 matches are read: a
+full window is reported, as inconclusive when it held no equal name or as
+possibly incomplete when it did — add --type.
+
 Examples:
   vsp -s a4h search "ZCL_*"
-  vsp search "Z*ORDER*" --type CLAS --max 50`,
+  vsp search "Z*ORDER*" --type CLAS --max 50
+  vsp search ZCL_ORDER --exact
+  vsp search ZCL_ORDER --exact --type CLAS`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSearch,
 }
@@ -565,6 +614,7 @@ Examples:
 func init() {
 	searchCmd.Flags().StringVarP(&objectType, "type", "t", "", "Filter by object type (CLAS, PROG, INTF, etc.)")
 	searchCmd.Flags().IntVarP(&maxResults, "max", "m", 100, "Maximum results")
+	searchCmd.Flags().Bool("exact", false, "Only objects whose name equals the query (case-insensitive, no wildcards); a full 1000-match window is reported as inconclusive or incomplete, so add --type")
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -586,9 +636,37 @@ func runSearch(cmd *cobra.Command, args []string) error {
 			query, adtType, maxResults)
 	}
 
-	results, err := client.SearchObjectByType(ctx, query, adtType, maxResults)
+	exact, _ := cmd.Flags().GetBool("exact")
+	filtered, err := searchObjects(ctx, client, query, adtType, maxResults, exact)
 	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
+		return err
+	}
+
+	// Output results
+	fmt.Printf("Found %d objects:\n", len(filtered))
+	for _, r := range filtered {
+		fmt.Printf("  %-10s %-40s %s\n", r.Type, r.Name, r.PackageName)
+	}
+
+	return nil
+}
+
+// searchObjects runs the search command's query: by pattern, or with exact
+// by name.
+func searchObjects(ctx context.Context, client *adt.Client, query, adtType string, maxResults int, exact bool) ([]adt.SearchResult, error) {
+	var results []adt.SearchResult
+	var err error
+	if exact {
+		var incomplete string
+		results, incomplete, err = client.SearchObjectExact(ctx, query, adtType, maxResults)
+		if err == nil && incomplete != "" {
+			fmt.Fprintf(os.Stderr, "Note: %s\n", incomplete)
+		}
+	} else {
+		results, err = client.SearchObjectByType(ctx, query, adtType, maxResults)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
 	// Filter by type if specified. Compare against the canonical type, since
@@ -604,13 +682,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Output results
-	fmt.Printf("Found %d objects:\n", len(filtered))
-	for _, r := range filtered {
-		fmt.Printf("  %-10s %-40s %s\n", r.Type, r.Name, r.PackageName)
-	}
-
-	return nil
+	return filtered, nil
 }
 
 // --- source command ---
@@ -643,9 +715,18 @@ Examples:
 }
 
 func init() {
-	sourceCmd.Flags().String("parent", "", "Function group name (required for FUNC type)")
-	sourceCmd.Flags().String("include", "", "Class include type: definitions, implementations, macros, testclasses (CLAS only)")
-	sourceCmd.Flags().String("method", "", "Method name to retrieve only that METHOD...ENDMETHOD block (CLAS only)")
+	addSourceReadFlags(sourceCmd)
+}
+
+// addSourceReadFlags gives a command that runs runSource the flags it reads.
+func addSourceReadFlags(cmds ...*cobra.Command) {
+	for _, c := range cmds {
+		c.Flags().String("parent", "", "Function group name (required for FUNC type)")
+		c.Flags().String("include", "", "Class include type: definitions, implementations, macros, testclasses (CLAS only)")
+		c.Flags().String("method", "", "Method name to retrieve only that METHOD...ENDMETHOD block (CLAS only)")
+		c.Flags().Bool("summary", false, "Print JSON metadata instead of the source: lines, bytes, sha256 (exact text, not normalised), sourceHash, uri")
+		c.Flags().String("if-none-match", "", "sha256 from an earlier --summary: if the source still has it, print \"unchanged: source sha256 ...\" instead of the source")
+	}
 }
 
 func runSource(cmd *cobra.Command, args []string) error {
@@ -665,6 +746,14 @@ func runSource(cmd *cobra.Command, args []string) error {
 	include, _ := cmd.Flags().GetString("include")
 	method, _ := cmd.Flags().GetString("method")
 
+	summary, _ := cmd.Flags().GetBool("summary")
+	ifNoneMatch, _ := cmd.Flags().GetString("if-none-match")
+	if strings.TrimSpace(ifNoneMatch) != "" {
+		if ifNoneMatch, err = adt.ParseIfNoneMatch(ifNoneMatch); err != nil {
+			return err
+		}
+	}
+
 	opts := &adt.GetSourceOptions{
 		Parent:  parent,
 		Include: include,
@@ -672,13 +761,35 @@ func runSource(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	source, err := client.GetSource(ctx, objType, name, opts)
+	if summary || ifNoneMatch != "" {
+		// Never from the response cache: see adt.WithFreshReads.
+		ctx = adt.WithFreshReads(ctx)
+	}
+	source, readURI, err := client.GetSourceWithURI(ctx, objType, name, opts)
 	if err != nil {
 		return fmt.Errorf("failed to get source: %w", err)
 	}
 
-	fmt.Print(source)
-	return nil
+	out := cmd.OutOrStdout()
+	if summary || ifNoneMatch != "" {
+		sum := adt.SummarizeSource(objType, name, opts, readURI, source)
+		unchanged := ifNoneMatch != "" && ifNoneMatch == sum.SHA256
+		if summary {
+			if ifNoneMatch != "" {
+				sum.Unchanged = &unchanged
+			}
+			data, _ := json.MarshalIndent(sum, "", "  ")
+			_, err := fmt.Fprintln(out, string(data))
+			return err
+		}
+		if unchanged {
+			_, err := fmt.Fprintln(out, adt.SourceUnchangedText(sum, false))
+			return err
+		}
+	}
+
+	_, err = fmt.Fprint(out, source)
+	return err
 }
 
 // --- systems command ---
@@ -723,7 +834,11 @@ func runSystems(cmd *cobra.Command, args []string) error {
 
 		// Determine auth method
 		authStatus := ""
-		if sys.CookieFile != "" {
+		if sys.SNC != nil {
+			authStatus = "snc:" + sys.SNC.System + "." + sys.SNC.Client + "/" + sys.SNC.User
+		} else if len(sys.TransportCmd) > 0 {
+			authStatus = "transport-cmd:" + adt.TransportCmdName(sys.TransportCmd)
+		} else if sys.CookieFile != "" {
 			authStatus = fmt.Sprintf("cookie-file:%s", sys.CookieFile)
 		} else if sys.CookieString != "" {
 			authStatus = "cookie-string:***"
@@ -739,7 +854,9 @@ func runSystems(cmd *cobra.Command, args []string) error {
 		}
 
 		userInfo := sys.User
-		if userInfo == "" {
+		if userInfo == "" && (len(sys.TransportCmd) > 0 || sys.SNC != nil) {
+			userInfo = "(helper)"
+		} else if userInfo == "" {
 			userInfo = "(cookie)"
 		}
 		fmt.Printf("  %-12s %s [%s@%s] %s%s\n", name, sys.URL, userInfo, sys.Client, authStatus, defaultMark)

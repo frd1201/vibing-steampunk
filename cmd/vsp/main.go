@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,14 +38,14 @@ var rootCmd = &cobra.Command{
 	Short: "ABAP Development Tools for AI agents and DevOps",
 	Long: `vsp — ABAP Development Tools for AI agents and DevOps.
 
-Single binary, 9 platforms, no dependencies. Download from GitHub releases,
+Single binary, 6 platforms, no dependencies. Download from GitHub releases,
 point your MCP config at it, done.
 
 Two modes of operation:
 
   MCP Server (default)  Connects Claude, Gemini CLI, Copilot, Codex, Qwen Code,
                         and other MCP-compatible agents to SAP systems.
-                        100 tools (focused), 151 (expert), or 1 universal tool (hyperfocused).
+                        98 tools (focused), 148 (expert), or 1 universal tool (hyperfocused).
 
   CLI Mode              Direct terminal access: search, source, export, debug.
                         Multi-system profiles. Useful for scripts and pipelines.
@@ -61,6 +63,11 @@ Quick start:
   vsp --read-only                                    # no writes at all
   vsp --allowed-packages 'Z*,$TMP' --block-free-sql  # sandbox AI to custom code
   vsp --disallowed-ops CDUA                           # block create/delete/update/activate
+
+  # 4. Through a helper that signs on itself and carries each ADT request
+  #    over its stdin/stdout (frames: 4-byte big-endian length + one raw
+  #    HTTP/1.1 message; one at a time; exit on stdin EOF; logs to stderr only)
+  vsp --url https://sidecar.invalid --transport-cmd /opt/tools/adt-helper
 
 Configuration files:
   .env          Default SAP connection (MCP server mode). SAP_URL, SAP_USER, etc.
@@ -98,8 +105,12 @@ Ready-to-use configs for 8 AI agents: docs/cli-agents/`,
 }
 
 func init() {
-	// Load .env file if it exists
-	godotenv.Load()
+	// Load .env file if it exists. Not for the hidden SNC commands: vsp starts
+	// them itself, and their environment is the one it handed over.
+	if !sncServeInvocation(os.Args) {
+		_ = godotenv.Load()
+	}
+	adt.SetHelperEnviron(func() []string { return append([]string(nil), startupEnviron...) })
 
 	// Service URL
 	rootCmd.Flags().StringVar(&cfg.BaseURL, "url", "", "SAP system URL (e.g., https://host:44300)")
@@ -140,6 +151,9 @@ func init() {
 	// Session keep-alive
 	rootCmd.Flags().Duration("keepalive", 0, "Session keep-alive interval (e.g., 60s, 5m). Prevents session timeout during idle periods. 0 = disabled (default; see #168)")
 
+	// Long calls
+	rootCmd.Flags().Int("call-timeout", 0, "Default budget in seconds of one long MCP call (ExecuteABAP, ABAP Unit, deploy, source write, activation) that names no params.timeout; at most 3600. 0 = none: each request to SAP is limited to 60s. A negative value is a startup error")
+
 	// Safety options
 	rootCmd.Flags().BoolVar(&cfg.ReadOnly, "read-only", false, "Block all write operations (create, update, delete, activate)")
 	rootCmd.Flags().BoolVar(&cfg.BlockFreeSQL, "block-free-sql", false, "Block execution of arbitrary SQL queries via RunQuery")
@@ -159,7 +173,7 @@ func init() {
 	rootCmd.Flags().StringVar(&cfg.TransportChoice, "transport-choice", "auto", "A write with no transport named: auto picks the object's own or an open request of yours that fits (and creates one with --enable-transports); off leaves it to SAP, which generates a request per write")
 
 	// Mode options
-	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (100 tools), or expert (151 tools)")
+	rootCmd.Flags().StringVar(&cfg.Mode, "mode", "hyperfocused", "Tool mode: hyperfocused (single universal SAP tool), focused (98 tools), or expert (148 tools)")
 	rootCmd.Flags().StringVar(&cfg.DisabledGroups, "disabled-groups", "", "Disable tool groups: 5/U=UI5, T=Tests, H=HANA, D=Debug, GC=gCTS, N=i18n")
 
 	// Transport options
@@ -239,8 +253,44 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Resolve configuration with priority: flags > env vars > defaults
 	resolveConfig(cmd)
 
+	// -s NAME naming a home-config system with an snc block or a
+	// transport_cmd supplies the logon itself.
+	if err := applyNamedTransportSystem(cmd, cfg); err != nil {
+		cmd.SilenceUsage = true
+		return err
+	}
+
+	// A transport command is exclusive with every logon flow of vsp's own,
+	// and those below contact the URL: refuse the mix before any of them runs.
+	if transportCmdErr != nil {
+		return transportCmdErr
+	}
+	if err := transportCmdConflicts(cmd); err != nil {
+		cmd.SilenceUsage = true
+		return err
+	}
+
 	// Validate configuration
 	if err := validateConfig(); err != nil {
+		return err
+	}
+
+	// Long-call budget of the MCP server: flag > SAP_CALL_TIMEOUT env
+	callTimeout, err := resolveCallTimeout(cmd)
+	if err != nil {
+		return err
+	}
+	cfg.CallTimeout = callTimeout
+
+	// The identity pin, against the configured logon, before any of the
+	// logon flows below can contact SAP: a wrong user or client is refused
+	// here, before a request carries anything anywhere. A browser, SAML or
+	// SSO logon has no user name yet; its user is checked after the preflight.
+	startupSystems, _, _ := config.LoadSystems()
+	userFlag := cmd.Flags().Changed("user")
+	if err := applyServerExpect(cfg, startupSystems, userFlag, interactiveLogon(cmd)); err != nil {
+		// A refusal, not a misspelt flag: the usage text would bury it.
+		cmd.SilenceUsage = true
 		return err
 	}
 
@@ -264,6 +314,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	logServerLogon(os.Stderr, cfg, startupSystems, userFlag)
+
 	if cfg.Verbose {
 		fmt.Fprintf(os.Stderr, "[VERBOSE] Starting vsp server\n")
 		fmt.Fprintf(os.Stderr, "[VERBOSE] Mode: %s\n", cfg.Mode)
@@ -273,7 +325,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP URL: %s\n", cfg.BaseURL)
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP Client: %s\n", cfg.Client)
 		fmt.Fprintf(os.Stderr, "[VERBOSE] SAP Language: %s\n", cfg.Language)
-		if cfg.Username != "" {
+		if len(cfg.TransportCmd) > 0 {
+			fmt.Fprintf(os.Stderr, "[VERBOSE] Auth: transport command %s (it authenticates; no local port)\n", adt.TransportCmdName(cfg.TransportCmd))
+		} else if cfg.Username != "" {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Auth: Basic (user: %s)\n", cfg.Username)
 		} else if cfg.ReauthFunc != nil {
 			fmt.Fprintf(os.Stderr, "[VERBOSE] Auth: SSO/SAML (%d cookies, re-authenticates when the session expires)\n", len(cfg.Cookies))
@@ -331,7 +385,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 		warnNamedSystemMismatch(os.Stderr, cfg, systemsCfg)
 
-		applyDefaultSystemSettings(cfg, systemsCfg)
+		applyDefaultSystemSettings(os.Stderr, cfg, systemsCfg)
 	}
 
 	// The binary's own identity, so SAP() can say which build answered. An
@@ -342,16 +396,27 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// Create and start MCP server
 	srv := mcp.NewServer(cfg)
 
-	switch cfg.Transport {
-	case "http":
-		addr := cfg.HTTPAddr
-		if cfg.Verbose {
-			fmt.Fprintf(os.Stderr, "[VERBOSE] Transport: Streamable HTTP on %s\n", addr)
+	return serveMCP(cmd, func() error {
+		switch cfg.Transport {
+		case "http":
+			addr := cfg.HTTPAddr
+			if cfg.Verbose {
+				fmt.Fprintf(os.Stderr, "[VERBOSE] Transport: Streamable HTTP on %s\n", addr)
+			}
+			return srv.ServeHTTP(addr)
+		default:
+			return srv.ServeStdio()
 		}
-		return srv.ServeHTTP(addr)
-	default:
-		return srv.ServeStdio()
-	}
+	})
+}
+
+// serveMCP runs the server once the command line is known to be good. From
+// here on an error is the server's, not the caller's spelling of a flag, so
+// cobra must not answer it with the usage text: an MCP client reads stderr as
+// the server's log, and a shutdown used to fill it with every flag vsp has.
+func serveMCP(cmd *cobra.Command, serve func() error) error {
+	cmd.SilenceUsage = true
+	return serve()
 }
 
 // warnNamedSystemMismatch says at startup when the system named by -s /
@@ -374,12 +439,16 @@ func warnNamedSystemMismatch(w io.Writer, c *mcp.Config, systemsCfg *config.Syst
 // empty from the default system in .vsp.json: transport_attribute, and where a
 // request vsp creates is filed, cts_project and transport_target. The CLI takes
 // the same keys from the system it runs against (resolveSystemParams).
-func applyDefaultSystemSettings(c *mcp.Config, systemsCfg *config.SystemsConfig) {
+func applyDefaultSystemSettings(w io.Writer, c *mcp.Config, systemsCfg *config.SystemsConfig) {
 	if systemsCfg == nil || systemsCfg.Default == "" {
 		return
 	}
 	sys, err := systemsCfg.GetSystem(systemsCfg.Default)
 	if err != nil {
+		// Not fatal for the server, which takes its logon elsewhere; but a
+		// default system that cannot be read (a refused transport_cmd, a
+		// default naming no system) should not pass in silence.
+		fmt.Fprintf(w, "[WARNING] default system settings from .vsp.json not applied: %v\n", err)
 		return
 	}
 	if c.TransportAttribute == "" && sys.TransportAttribute != "" {
@@ -404,6 +473,9 @@ func resolveConfig(cmd *cobra.Command) {
 	samlAuth, _ := cmd.Flags().GetBool("saml-auth")
 	hasSAMLAuth := samlAuth || viper.GetBool("SAML_AUTH")
 	hasCookieAuth := cookieAuthViaCLI || cookieAuthViaEnv || hasBrowserAuth || hasSAMLAuth || ssoRequested(cmd)
+
+	// Transport command: --transport-cmd/--transport-arg > SAP_TRANSPORT_CMD
+	cfg.TransportCmd, transportCmdErr = resolveTransportCmd(cmd)
 
 	// URL: flag > SAP_URL env
 	if cfg.BaseURL == "" {
@@ -577,6 +649,58 @@ func resolveConfig(cmd *cobra.Command) {
 	} else {
 		cfg.KeepAliveInterval, _ = cmd.Flags().GetDuration("keepalive")
 	}
+}
+
+// resolveCallTimeout reads --call-timeout, else SAP_CALL_TIMEOUT: seconds
+// (the env also takes a Go duration such as 5m). 0, or nothing set, means no
+// budget of the server's own. Anything else that is not at least one second
+// is an error, not a silent "no budget": a typo would otherwise take the limit
+// the operator meant to set away without a word. Capped at MaxCallTimeout.
+func resolveCallTimeout(cmd *cobra.Command) (time.Duration, error) {
+	var d time.Duration
+	var source string
+	if cmd.Flags().Changed("call-timeout") {
+		secs, err := cmd.Flags().GetInt("call-timeout")
+		if err != nil {
+			return 0, fmt.Errorf("--call-timeout: %w", err)
+		}
+		source = fmt.Sprintf("--call-timeout %d", secs)
+		if secs < 0 {
+			return 0, fmt.Errorf("%s: must be a number of seconds, at least 1 (0 for none)", source)
+		}
+		if secs > int(mcp.MaxCallTimeout/time.Second) {
+			return mcp.MaxCallTimeout, nil
+		}
+		d = time.Duration(secs) * time.Second
+	} else if v := strings.TrimSpace(viper.GetString("CALL_TIMEOUT")); v != "" {
+		source = fmt.Sprintf("SAP_CALL_TIMEOUT=%q", v)
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+				return 0, fmt.Errorf("%s: must be a number of seconds, at least 1 (0 for none)", source)
+			}
+			if f > mcp.MaxCallTimeout.Seconds() {
+				return mcp.MaxCallTimeout, nil
+			}
+			d = time.Duration(f * float64(time.Second))
+		} else if pd, err := time.ParseDuration(v); err == nil {
+			if pd < 0 {
+				return 0, fmt.Errorf("%s: must not be negative", source)
+			}
+			d = pd
+		} else {
+			return 0, fmt.Errorf("%s: not a number of seconds or a duration such as 5m", source)
+		}
+	}
+	if d == 0 {
+		return 0, nil
+	}
+	if d < time.Second {
+		return 0, fmt.Errorf("%s: below 1s; give at least one second, or 0 for none", source)
+	}
+	if d > mcp.MaxCallTimeout {
+		d = mcp.MaxCallTimeout
+	}
+	return d, nil
 }
 
 func validateConfig() error {
@@ -813,6 +937,15 @@ func processSAMLAuth(cmd *cobra.Command) error {
 }
 
 func processCookieAuth(cmd *cobra.Command) error {
+	// A transport command authenticates on its own; it needs, and takes,
+	// no other method.
+	if transportCmdErr != nil {
+		return transportCmdErr
+	}
+	if len(cfg.TransportCmd) > 0 {
+		return transportCmdConflicts(cmd)
+	}
+
 	cookieFile, _ := cmd.Flags().GetString("cookie-file")
 	cookieString, _ := cmd.Flags().GetString("cookie-string")
 
@@ -845,7 +978,7 @@ func processCookieAuth(cmd *cobra.Command) error {
 	}
 
 	if authMethods == 0 {
-		return fmt.Errorf("authentication required. Use --user/--password, --cookie-file, --cookie-string, --browser-auth, or --saml-auth")
+		return fmt.Errorf("authentication required. Use --user/--password, --cookie-file, --cookie-string, --browser-auth, --saml-auth, or --transport-cmd")
 	}
 
 	// If cookies already set by browser auth, we're done
@@ -915,7 +1048,13 @@ func splitCommaSeparated(s string) []string {
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
+	if sncServeInvocation(os.Args) {
+		os.Exit(runSNCServe(os.Args, os.Stdin, os.Stdout, os.Stderr))
+	}
+	err := rootCmd.Execute()
+	// The CLI's transport-command helpers, on success and on error alike.
+	closeTransportCmds()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

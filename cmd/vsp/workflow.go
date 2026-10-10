@@ -291,6 +291,15 @@ func createADTClient() *adt.Client {
 	if len(cfg.Cookies) > 0 {
 		opts = append(opts, adt.WithCookies(cfg.Cookies))
 	}
+	if cfg.Expect != nil {
+		opts = append(opts, adt.WithExpect(*cfg.Expect))
+	}
+	if len(cfg.TransportCmd) > 0 {
+		opts = append(opts, adt.WithTransportCmd(cfg.TransportCmd))
+		client := adt.NewClient(cfg.BaseURL, cfg.Username, cfg.Password, opts...)
+		trackTransportCmd(client.CloseTransport)
+		return client
+	}
 
 	// SAP_SESSION_TYPE reaches cfg at cmd/vsp/main.go, and the MCP server and
 	// getClient both act on it — this builder did not, so `vsp lua`, `vsp lsp`,

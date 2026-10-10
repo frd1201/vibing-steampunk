@@ -33,6 +33,11 @@ var objectTypeMapping = map[string]struct {
 //	Phase 2: Upload source code (Lock → UpdateSource → Unlock, NO syntax check)
 //	Phase 3: Mass activate all objects
 func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return s.longCall(ctx, request, "deploy_zip", s.deployZip)
+}
+
+// deployZip is handleDeployZip without the call budget (see longCall).
+func (s *Server) deployZip(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Parse parameters
 	source, _ := request.GetArguments()["source"].(string)
 	if source == "" {
@@ -193,14 +198,14 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 
 		fmt.Fprintf(&sb, "  [%d/%d] Create %s %s... ", i+1, len(deployable), obj.Type, obj.Name)
 
-		createErr := s.adtClient.CreateObject(ctx, adt.CreateObjectOptions{
+		err := s.adtClient.CreateObject(ctx, adt.CreateObjectOptions{
 			ObjectType:  typeInfo.creatableType,
 			Name:        obj.Name,
 			Description: desc,
 			PackageName: packageName,
 		})
-		if createErr != nil {
-			if strings.Contains(createErr.Error(), "AlreadyExists") || strings.Contains(createErr.Error(), "already exist") {
+		if err != nil {
+			if strings.Contains(err.Error(), "AlreadyExists") || strings.Contains(err.Error(), "already exist") {
 				fmt.Fprintf(&sb, "exists\n")
 				createSkipped++
 			} else {
@@ -221,10 +226,6 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 	sb.WriteString("Phase 2: Uploading source code...\n")
 	var uploadSuccess, uploadFailed int
 	var uploadFailures []string
-	// Kept apart from uploadFailures: an object whose source landed but whose
-	// UNLOCK did not is counted as uploaded, so listing it under "Upload
-	// failures" made the two halves of the summary contradict each other.
-	var strandedLocks []string
 
 	for i, obj := range deployable {
 		typeInfo, ok := objectTypeMapping[obj.Type]
@@ -243,53 +244,49 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 		// wire — a stateless request that retires the session the lock handle
 		// belongs to, so the upload comes back 423 (issue #91). The returned
 		// context carries the result of that check for this object only.
-		objCtx, gateErr := s.adtClient.PrepareSourceUpdate(ctx, objectURL, "")
-		if gateErr != nil {
-			fmt.Fprintf(&sb, "BLOCKED: %v\n", gateErr)
+		objCtx, err := s.adtClient.PrepareSourceUpdate(ctx, objectURL, "")
+		if err != nil {
+			fmt.Fprintf(&sb, "BLOCKED: %v\n", err)
 			uploadFailed++
-			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: %v", obj.Type, obj.Name, gateErr))
+			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: %v", obj.Type, obj.Name, err))
 			continue
 		}
 
 		// Lock
-		lockResult, lockErr := s.adtClient.LockObject(objCtx, objectURL, "MODIFY")
-		if lockErr != nil {
-			fmt.Fprintf(&sb, "LOCK FAIL: %v\n", lockErr)
+		lockResult, err := s.adtClient.LockObject(objCtx, objectURL, "MODIFY")
+		if err != nil {
+			fmt.Fprintf(&sb, "LOCK FAIL: %v\n", err)
 			uploadFailed++
-			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: lock failed: %v", obj.Type, obj.Name, lockErr))
+			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: lock failed: %v", obj.Type, obj.Name, err))
 			continue
 		}
 
 		// Upload source (no syntax check!)
-		uploadErr := s.adtClient.UpdateSource(objCtx, sourceURL, obj.MainSource, lockResult.LockHandle, "")
-		if uploadErr != nil {
-			// Always try to unlock even if upload fails — and on a context
-			// detached from objCtx, because the most likely reason the upload
-			// failed at all is that objCtx expired, and an unlock issued on an
-			// expired context never leaves the process.
-			unlockErr := s.adtClient.ReleaseLock(objCtx, objectURL, lockResult.LockHandle)
-			fmt.Fprintf(&sb, "UPLOAD FAIL: %v\n", uploadErr)
+		err = s.adtClient.UpdateSource(objCtx, sourceURL, obj.MainSource, lockResult.LockHandle, "")
+		if err != nil {
+			// Always try to unlock even if upload fails — on a context of its
+			// own: the upload may have failed because objCtx ran out (a call
+			// budget), and an UNLOCK on it would fail before it was sent.
+			unlockErr := s.unlockAfterUpload(objCtx, objectURL, lockResult.LockHandle)
+			fmt.Fprintf(&sb, "UPLOAD FAIL: %v\n", err)
 			uploadFailed++
-			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: upload failed: %v", obj.Type, obj.Name, uploadErr))
+			uploadFailures = append(uploadFailures, fmt.Sprintf("%s %s: upload failed: %v", obj.Type, obj.Name, err))
 			if unlockErr != nil {
-				strandedLocks = append(strandedLocks,
-					fmt.Sprintf("%s %s: upload failed and the unlock did too: %v (clear it in SM12, or wait for the ADT session timeout)", obj.Type, obj.Name, unlockErr))
+				uploadFailures = append(uploadFailures,
+					fmt.Sprintf("%s %s: LEFT LOCKED — unlock also failed: %v (clear it in SM12, or wait for the ADT session timeout)", obj.Type, obj.Name, unlockErr))
 			}
 			continue
 		}
 
-		// Unlock, detached for the same reason as above.
-		releaseErr := s.adtClient.ReleaseLock(objCtx, objectURL, lockResult.LockHandle)
-		if releaseErr != nil {
-			// Not fatal for the source, which is written — so it still counts
-			// as uploaded — but the object is left locked, which is fatal for
-			// the next person to touch it. Say so on this object's own line
-			// instead of printing "ok" straight after the failure.
-			fmt.Fprintf(&sb, "uploaded, but LEFT LOCKED: %v\n", releaseErr)
-			strandedLocks = append(strandedLocks,
-				fmt.Sprintf("%s %s: source uploaded but LEFT LOCKED: %v (clear it in SM12, or wait for the ADT session timeout)", obj.Type, obj.Name, releaseErr))
-			uploadSuccess++
-			continue
+		// Unlock, also when the call's budget ran out during the upload.
+		err = s.unlockAfterUpload(objCtx, objectURL, lockResult.LockHandle)
+		if err != nil {
+			// Not fatal for the source, which is written — but the object is
+			// left locked, so it is fatal for the next person to touch it and
+			// must not be swallowed into the summary as a success.
+			fmt.Fprintf(&sb, "UNLOCK FAIL: %v\n", err)
+			uploadFailures = append(uploadFailures,
+				fmt.Sprintf("%s %s: source uploaded but LEFT LOCKED: %v (clear it in SM12, or wait for the ADT session timeout)", obj.Type, obj.Name, err))
 		}
 
 		fmt.Fprintf(&sb, "ok\n")
@@ -335,20 +332,19 @@ func (s *Server) handleDeployZip(ctx context.Context, request mcp.CallToolReques
 		}
 	}
 
-	// Separate heading: these objects are uploaded, so they are inside the
-	// "ok" count above. What is wrong with them is the ENQUEUE, and the next
-	// person to touch them is who it blocks.
-	if len(strandedLocks) > 0 {
-		sb.WriteString("\nObjects left LOCKED:\n")
-		for _, l := range strandedLocks {
-			fmt.Fprintf(&sb, "  • %s\n", l)
-		}
-	}
-
 	if len(skipped) > 0 {
 		fmt.Fprintf(&sb, "\n%d objects skipped (not supported via ADT native).\n", len(skipped))
 		sb.WriteString("Install ZADT_VSP to enable full object type support.\n")
 	}
 
 	return mcp.NewToolResultText(sb.String()), nil
+}
+
+// unlockAfterUpload releases a deploy_zip lock on a context detached from
+// ctx's cancellation, with a deadline of its own, so the UNLOCK is sent even
+// when the call's budget ran out inside the lock window.
+func (s *Server) unlockAfterUpload(ctx context.Context, objectURL, lockHandle string) error {
+	unlockCtx, cancel := adt.CleanupContext(ctx)
+	defer cancel()
+	return s.adtClient.UnlockObject(unlockCtx, objectURL, lockHandle)
 }
