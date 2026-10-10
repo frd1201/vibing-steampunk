@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/oisee/vibing-steampunk/pkg/adt"
 	"github.com/oisee/vibing-steampunk/pkg/config"
 	"github.com/spf13/cobra"
 )
@@ -106,7 +107,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 
 	// Environment variables
 	fmt.Println("Environment Variables (SAP_* / VSP_*):")
-	envVars := []string{"SAP_URL", "SAP_USER", "SAP_CLIENT", "SAP_LANGUAGE", "SAP_INSECURE", "SAP_MODE", "VSP_TRANSPORT_ATTRIBUTE"}
+	envVars := []string{"SAP_URL", "SAP_USER", "SAP_CLIENT", "SAP_LANGUAGE", "SAP_INSECURE", "SAP_MODE", "SAP_EXPECT", "VSP_TRANSPORT_ATTRIBUTE"}
 	hasEnv := false
 	for _, key := range envVars {
 		if val := os.Getenv(key); val != "" {
@@ -119,6 +120,16 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	}
 	if os.Getenv("SAP_PASSWORD") != "" {
 		fmt.Printf("  SAP_PASSWORD=***\n")
+		hasEnv = true
+	}
+	if v := os.Getenv("SAP_TRANSPORT_CMD"); v != "" {
+		// The program's name only: its arguments may name a profile or a
+		// path that is nobody else's business.
+		name := "(malformed)"
+		if argv, err := parseTransportCmdEnv(v); err == nil {
+			name = adt.TransportCmdName(argv)
+		}
+		fmt.Printf("  SAP_TRANSPORT_CMD=transport-cmd:%s\n", name)
 		hasEnv = true
 	}
 	if !hasEnv {
@@ -147,7 +158,11 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		for name, sys := range cfg.Systems {
 			pwdStatus := "env"
 			envKey := fmt.Sprintf("VSP_%s_PASSWORD", strings.ToUpper(name))
-			if sys.Password != "" {
+			if sys.SNC != nil {
+				pwdStatus = "- snc:" + sys.SNC.System + "." + sys.SNC.Client + "/" + sys.SNC.User
+			} else if len(sys.TransportCmd) > 0 {
+				pwdStatus = "- transport-cmd:" + adt.TransportCmdName(sys.TransportCmd)
+			} else if sys.Password != "" {
 				pwdStatus = "inline"
 			} else if os.Getenv(envKey) != "" {
 				pwdStatus = "env ✓"
@@ -177,9 +192,15 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 					cacheStatus = "on"
 				}
 			}
-			fmt.Printf("    %s: %s [%s@%s] pwd:%s attr:%s cache:%s%s\n", name, sys.URL, sys.User, sys.Client, pwdStatus, attrStatus, cacheStatus, marker)
+			expect := ""
+			if sys.Expect != "" {
+				expect = " expect:" + strings.ToUpper(sys.Expect)
+			}
+			fmt.Printf("    %s: %s [%s@%s] pwd:%s attr:%s cache:%s%s%s\n", name, sys.URL, sys.User, sys.Client, pwdStatus, attrStatus, cacheStatus, expect, marker)
 		}
 	}
+
+	printLogonSources(os.Stdout, cfg)
 
 	// MCP config
 	fmt.Println("\nMCP Config (.mcp.json):")
@@ -843,7 +864,7 @@ func GetAllToolNames() []string {
 		// Git/abapGit (requires ZADT_VSP)
 		"GitTypes", "GitExport",
 		// Install tools
-		"InstallZADTVSP", "InstallAbapGit", "ListDependencies", "InstallDummyTest",
+		"InstallZADTVSP", "ListDependencies",
 		// UI5/BSP
 		"UI5ListApps", "UI5GetApp", "UI5GetFileContent",
 		"UI5CreateApp", "UI5DeleteApp", "UI5DeleteFile", "UI5UploadFile",

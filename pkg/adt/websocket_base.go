@@ -55,7 +55,24 @@ type BaseWebSocketClient struct {
 	// closed is closed when the connection ends.
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	// credentials, when set, runs before the connection is opened: the ADT
+	// client this WebSocket was built from verifies its identity pin and
+	// hands over the credentials of exactly the session it verified (see
+	// websocket_for_client.go), which replace the ones copied at
+	// construction. Set only for a pinned client; nil: nothing to check.
+	credentials func(ctx context.Context) (user, password string, cookies map[string]string, err error)
+
+	// transportCmd names the transport command of the ADT client this
+	// WebSocket was built from. Such a client reaches SAP only through a
+	// helper that carries ADT HTTP requests, so there is nothing to dial:
+	// BaseURL may be a placeholder. Non-empty: Connect refuses.
+	transportCmd string
 }
+
+// ErrWebSocketOverTransportCmd is returned by Connect for a client whose ADT
+// requests go through a transport command.
+var ErrWebSocketOverTransportCmd = errors.New("the ZADT_VSP WebSocket features are not available over a transport command, which carries ADT HTTP requests only")
 
 // ErrWebSocketClosed is returned to a waiter whose connection ended.
 var ErrWebSocketClosed = errors.New("the ZADT_VSP WebSocket connection was closed")
@@ -194,10 +211,25 @@ func NewBaseWebSocketClient(baseURL, client, user, password string, insecure boo
 
 // Connect establishes WebSocket connection to ZADT_VSP.
 func (c *BaseWebSocketClient) Connect(ctx context.Context) error {
+	if c.transportCmd != "" {
+		return fmt.Errorf("%w (%s)", ErrWebSocketOverTransportCmd, c.transportCmd)
+	}
+	pinned := c.credentials != nil
+	var user, password string
+	var cookies map[string]string
+	if pinned {
+		var err error
+		if user, password, cookies, err = c.credentials(ctx); err != nil {
+			return err
+		}
+	}
 	c.mu.Lock()
 	if c.conn != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("already connected")
+	}
+	if pinned {
+		c.user, c.password, c.cookies = user, password, cookies
 	}
 
 	// Build WebSocket URL
@@ -229,6 +261,14 @@ func (c *BaseWebSocketClient) Connect(ctx context.Context) error {
 	// Try 2: If 401, pre-authenticate to get session cookies first.
 	// Some SAP systems reject standalone Basic Auth on WebSocket upgrade
 	// but accept it on regular HTTP to issue session cookies.
+	//
+	// Not under an identity pin: that second attempt sends the password again,
+	// and if the first 401 was the password's fault, it is a second failed
+	// logon toward the lock. Pinned, the first 401 is final.
+	if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized && !c.hasCookieAuth() && pinned {
+		c.mu.Unlock()
+		return fmt.Errorf("WebSocket upgrade refused (HTTP 401) for %s; not retried with the password, because every failed logon counts toward locking the account (an identity pin is set). If this system refuses basic auth on the WebSocket upgrade, use a cookie or SSO session: %w", strings.ToUpper(c.user), err)
+	}
 	if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized && !c.hasCookieAuth() {
 		// newCookieJar, not cookiejar.New: on a plain-HTTP system behind a
 		// proxy that still marks its cookies Secure, a bare jar stores them
@@ -429,9 +469,9 @@ func (c *BaseWebSocketClient) SendDomainRequest(ctx context.Context, domain, act
 		return nil, err
 	}
 
-	c.mu.Lock()
-	err = c.conn.WriteMessage(websocket.TextMessage, data)
-	c.mu.Unlock()
+	// Through WriteMessage, which checks the connection under the lock: a
+	// Close between the check above and this write leaves c.conn nil.
+	err = c.WriteMessage(data)
 	if err != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, id)
@@ -478,9 +518,9 @@ func (c *BaseWebSocketClient) SendRawRequest(ctx context.Context, id string, raw
 		return nil, err
 	}
 
-	c.mu.Lock()
-	err = c.conn.WriteMessage(websocket.TextMessage, data)
-	c.mu.Unlock()
+	// Through WriteMessage, which checks the connection under the lock: a
+	// Close between the check above and this write leaves c.conn nil.
+	err = c.WriteMessage(data)
 	if err != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, id)

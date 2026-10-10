@@ -144,6 +144,9 @@ func (c *Client) writeFunctionModule(ctx context.Context, group, name, processin
 		return fmt.Errorf("locking function module %s: %w", strings.ToUpper(name), err)
 	}
 	unlocked := false
+	// unlockRetried marks a failed final unlock: the release below is then
+	// its retry, detached from ctx.
+	unlockRetried := false
 	defer func() {
 		if !unlocked {
 			// The compensating unlock is the only place a leak can be
@@ -155,6 +158,8 @@ func (c *Client) writeFunctionModule(ctx context.Context, group, name, processin
 				} else {
 					retErr = fmt.Errorf("%s", advice)
 				}
+			} else if unlockRetried && retErr != nil {
+				retErr = fmt.Errorf("%w — the lock was released on a retry", retErr)
 			}
 		}
 	}()
@@ -183,16 +188,12 @@ func (c *Client) writeFunctionModule(ctx context.Context, group, name, processin
 		}
 	}
 
-	// Detached from the caller's cancellation for the same reason the defer
-	// above is: a write that finished just as the context expired would
-	// otherwise leave the ENQUEUE behind, because the unlock never leaves the
-	// process. Marked released either way, so the defer does not send a second
-	// UNLOCK for a handle this one already consumed.
-	unlocked = true
-	if err := c.releaseLockAfterFailure(ctx, objectURL, lock.LockHandle); err != nil {
-		return fmt.Errorf("unlocking function module %s: %w — %s",
-			strings.ToUpper(name), err, strandedLockAdvice(objectURL, err))
+	if err := c.UnlockObject(ctx, objectURL, lock.LockHandle); err != nil {
+		// Left to the deferred release, which retries detached from ctx.
+		unlockRetried = true
+		return fmt.Errorf("unlocking function module %s: %w", strings.ToUpper(name), err)
 	}
+	unlocked = true
 	return nil
 }
 

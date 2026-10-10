@@ -30,10 +30,11 @@ BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Linker flags
 LDFLAGS=-ldflags "-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(BUILD_DATE)"
 
-# Platforms for cross-compilation
-PLATFORMS_LINUX=linux/amd64 linux/arm64 linux/386 linux/arm
+# Platforms for cross-compilation: the six release platforms (.github/ci/release.sh
+# PLATFORMS). linux/386, linux/arm and windows/386 are not built since v2.60.0.
+PLATFORMS_LINUX=linux/amd64 linux/arm64
 PLATFORMS_DARWIN=darwin/amd64 darwin/arm64
-PLATFORMS_WINDOWS=windows/amd64 windows/arm64 windows/386
+PLATFORMS_WINDOWS=windows/amd64 windows/arm64
 PLATFORMS=$(PLATFORMS_LINUX) $(PLATFORMS_DARWIN) $(PLATFORMS_WINDOWS)
 
 # Common platforms (fast build)
@@ -53,9 +54,9 @@ CURRENT_ARCH=$(shell go env GOARCH)
 EXE=$(if $(filter windows,$(CURRENT_OS)),.exe,)
 LOCAL_BINARY=$(BINARY_NAME)-$(CURRENT_OS)-$(CURRENT_ARCH)$(EXE)
 
-.PHONY: all build clean test lint fmt deps tidy help install install-user link local-alias run
+.PHONY: all build clean test lint lint-full metrics fmt deps tidy help install install-user link local-alias run
 .PHONY: build-all build-all-all build-linux build-darwin build-windows build-win sso-helper
-.PHONY: deploy-windows sync-embedded release refresh-deps fetch-deps check-deps
+.PHONY: deploy-windows sync-embedded release prep-release release-dist refresh-deps fetch-deps check-deps
 
 all: deps lint test build
 
@@ -95,7 +96,7 @@ build-all: sso-helper ## Build for common platforms (linux-amd64, darwin-arm64, 
 	@echo "Build complete. Binaries in $(BUILD_DIR)/"
 	@ls -lh $(BUILD_DIR)/
 
-build-all-all: sso-helper ## Build for ALL platforms (linux, darwin, windows - amd64, arm64, 386, arm)
+build-all-all: sso-helper ## Build for all six release platforms (linux, darwin, windows - amd64, arm64)
 	@mkdir -p $(BUILD_DIR)
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; \
@@ -108,7 +109,7 @@ build-all-all: sso-helper ## Build for ALL platforms (linux, darwin, windows - a
 	@echo "Build complete. Binaries in $(BUILD_DIR)/"
 	@ls -lh $(BUILD_DIR)/
 
-build-linux: ## Build for Linux (amd64, arm64, 386, arm)
+build-linux: ## Build for Linux (amd64, arm64)
 	@mkdir -p $(BUILD_DIR)
 	@for platform in $(PLATFORMS_LINUX); do \
 		arch=$${platform#*/}; \
@@ -126,7 +127,7 @@ build-darwin: ## Build for macOS (amd64, arm64)
 		GOOS=darwin GOARCH=$$arch $(GOBUILD) $(LDFLAGS) -o $$output $(CMD_DIR) || exit 1; \
 	done
 
-build-windows: ## Build for Windows (amd64, arm64, 386)
+build-windows: ## Build for Windows (amd64, arm64)
 	@mkdir -p $(BUILD_DIR)
 	@for platform in $(PLATFORMS_WINDOWS); do \
 		arch=$${platform#*/}; \
@@ -175,7 +176,7 @@ deploy-windows: ## Build vsp.exe + vsp-sso.exe (amd64) and copy both to $(WINDOW
 sync-embedded: ## Copy the ZADT_VSP sources vsp install deploys from src/ into embedded/abap/
 	$(GOCMD) generate ./embedded/abap
 
-# SAP system for dependency refresh (override with: make release SAP_SYSTEM=prod)
+# SAP system for dependency refresh (override with: make prep-release SAP_SYSTEM=prod)
 SAP_SYSTEM ?= a4h
 
 fetch-deps: ## Build the embedded abapGit archive from upstream, reproducibly
@@ -201,8 +202,23 @@ refresh-deps: ## Refresh embedded ZIPs from SAP — prefer fetch-deps, which is 
 		echo "  abapgit-standalone.zip: kept existing (SAP export failed)"; \
 	fi
 
-release: build refresh-deps build-all ## Full release: build vsp, refresh deps from SAP, rebuild all platforms
-	@echo "Release build complete."
+prep-release: build refresh-deps build-all ## Before tagging: refresh embedded deps from SAP and build locally (not a release)
+	@echo "Prep done. Commit any refreshed deps; a release is cut by pushing a tag (.claude/commands/celebrate.md)."
+
+release: ## Not a release any more: see prep-release, release-dist and .claude/commands/celebrate.md
+	@echo "Releases are cut by pushing a vX.Y.Z tag; CI builds, verifies and publishes."; \
+	echo "  make prep-release              refresh deps from SAP and build locally"; \
+	echo "  make release-dist TAG=vX.Y.Z   the CI build and checks, as a dry run or manual fallback"; \
+	exit 1
+
+# The release workflow builds and checks through .github/ci/release.sh; this
+# runs the same script, so it is both the dry run and the manual fallback. It
+# refuses a dirty tree or a HEAD that is not the tag: use a fresh worktree.
+release-dist: ## Build + verify the 6 release assets for TAG into dist/ (what CI runs): make release-dist TAG=vX.Y.Z
+	@test -n "$(TAG)" || { echo "usage: make release-dist TAG=vX.Y.Z"; exit 1; }
+	./.github/ci/release.sh build $(TAG) dist
+	./.github/ci/release.sh verify $(TAG) dist
+	./.github/ci/release.sh run $(TAG) dist $(LOCAL_BINARY)
 
 # GOPATH is a Go environment value, not a make variable: left as $(GOPATH) it
 # expanded to nothing and this target installed to /bin.
@@ -245,12 +261,18 @@ fmt: ## Format code
 		$(GOCMD) fmt ./...; \
 	fi
 
-lint: ## Run linter
+lint: ## Run linter (the CI gate: correctness linters, new issues since origin/main)
 	@if command -v $(GOLINT) >/dev/null 2>&1; then \
 		$(GOLINT) run ./...; \
 	else \
 		echo "golangci-lint not installed, skipping..."; \
 	fi
+
+lint-full: ## Run every linter over the whole tree (advisory debt count, as CI does)
+	./.github/ci/lint.sh full
+
+metrics: ## Size and complexity metrics (JSON on stdout, summary on stderr)
+	cd .github/ci/metrics && go run . -root ../../.. -baseline ../complexity-baseline.json -o -
 
 ## Testing
 

@@ -161,6 +161,12 @@ type Transport struct {
 	// client holds a lock handle. Cookie-file recovery is refused while it
 	// does: reloading would replace the session the lock belongs to.
 	lockOutstanding func() bool
+
+	// identity enforces Config.Expect: nil when nothing is pinned.
+	identity *identityGate
+	// authGen counts changes of the credentials the transport sends (see
+	// credentialsChanged); the identity pin's verdict belongs to one value.
+	authGen atomic.Uint64
 }
 
 // NewTransport creates a new Transport with the given configuration.
@@ -182,6 +188,9 @@ func NewTransportWithClient(cfg *Config, client HTTPDoer) *Transport {
 	}
 	if cfg.Cache {
 		t.cache = newResponseCache(cfg.CacheStore, cfg.CacheTTL)
+	}
+	if cfg.Expect != nil {
+		t.identity = &identityGate{pin: *cfg.Expect}
 	}
 	return t
 }
@@ -223,6 +232,11 @@ type RequestOptions struct {
 	// ends the context it arrives in, which is how a finished lock chain's
 	// context is retired instead of lingering until the session timeout.
 	ReleaseContext bool
+
+	// noBasicAuthRetry returns a 401 on a password logon at once, without the
+	// CSRF refresh and retry: the identity preflight, which must not turn one
+	// wrong password into several failed logons.
+	noBasicAuthRetry bool
 }
 
 // Response wraps an HTTP response with convenience methods.
@@ -256,8 +270,10 @@ func (t *Transport) Request(ctx context.Context, path string, opts *RequestOptio
 		return nil, fmt.Errorf("building URL: %w", err)
 	}
 	key += "\x00" + opts.Method + "\x00" + opts.Accept + "\x00" + fmt.Sprint(opts.Headers) + "\x00" + string(opts.Body)
-	if resp, ok := t.cache.get(key); ok {
-		return resp, nil
+	if !freshReads(ctx) {
+		if resp, ok := t.cache.get(key); ok {
+			return resp, nil
+		}
 	}
 	resp, err := t.request(ctx, path, opts)
 	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -404,6 +420,9 @@ func (t *Transport) request(ctx context.Context, path string, opts *RequestOptio
 		// This happens after idle periods when the SAP session expires.
 		// We preserve apiErr so the original path/body is not lost if re-auth itself fails.
 		if resp.StatusCode == http.StatusUnauthorized {
+			if opts.noBasicAuthRetry && t.config.HasBasicAuth() {
+				return nil, apiErr
+			}
 			if err := t.requireSafeReauth(opts, path, apiErr); err != nil {
 				return nil, err
 			}
@@ -911,20 +930,55 @@ func (t *Transport) applyProxyContextIDGuard(req *http.Request, opts *RequestOpt
 // the guard there is nothing to retire and the call is a no-op. The request
 // is a cheap stateless HEAD that carries no guard cookie, so the chain
 // injects its stored context and SAP ends it (verified: SM04 shows no
-// lingering ADT sessions afterwards). Failures are ignored: an already-dead
-// context answers ICMENOSESSION, which is the state this call wants anyway,
-// and the next LOCK opens a fresh context regardless.
+// lingering ADT sessions afterwards). Nothing is sent while another lock
+// chain or stateful request uses the context (see retireProxyContext).
+// Failures are ignored: an already-dead context answers ICMENOSESSION, which
+// is the state this call wants anyway, and the next LOCK opens a fresh
+// context regardless. retireProxyContext is the same call for a caller that
+// needs to know whether it worked.
 func (t *Transport) ReleaseProxyContext(ctx context.Context) {
+	_ = t.retireProxyContext(ctx)
+}
+
+// errProxyContextShared: another lock chain or a stateful request was using
+// the proxy's context, so no release was sent: the proxy would inject that
+// context, the one in use, and the release would end it.
+var errProxyContextShared = errors.New("another lock chain or stateful request is using the proxy context; it was not retired")
+
+// retireProxyContext is ReleaseProxyContext with its outcome. nil means the
+// guard is off (nothing to retire) or the chain answered 2xx to a release
+// that carried its context. Anything else is an error, and the context, with
+// any ENQUEUE in it, may still be there: the request never got an answer, it
+// got a non-2xx answer, or it was not sent at all.
+//
+// It is not sent while another lock chain holds a handle or a stateful
+// request is under way. The release carries no cookie of its own; the proxy
+// injects whichever context it holds at that moment, which may be the other
+// caller's. The check and the send happen under the context gate's shared
+// side, which no stateful request (a LOCK included) can enter, so neither
+// can change in between. A caller told "not retired" UNLOCKs with its own
+// handle instead.
+//
+// A HEAD answer has no body, so a 4xx cannot be told apart from
+// ICMENOSESSION here; a caller that must know releases the lock itself.
+func (t *Transport) retireProxyContext(ctx context.Context) error {
 	if !t.config.ProxyContextIDGuard {
-		return
+		return nil
+	}
+	if !t.contextGate.tryShared() {
+		return errProxyContextShared
+	}
+	defer t.contextGate.releaseShared()
+	if t.contextInFlight.Load() != 0 || (t.locks != nil && t.locks.present()) {
+		return errProxyContextShared
 	}
 	reqURL, err := t.buildURL("/sap/bc/adt/core/discovery", nil)
 	if err != nil {
-		return
+		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL, nil)
 	if err != nil {
-		return
+		return err
 	}
 	if t.config.HasBasicAuth() {
 		req.SetBasicAuth(t.config.Username, t.config.Password)
@@ -933,16 +987,19 @@ func (t *Transport) ReleaseProxyContext(ctx context.Context) {
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-sap-adt-sessiontype", "stateless")
 	traceHTTPRequest(req, nil)
-	// Through do, like every other request: while another chain holds a lock
-	// or a stateful request is under way, the release goes without the
-	// context id and leaves that chain's context alone.
-	resp, err := t.do(req)
+	// Straight to send, as do does for a stateless request when the gate is
+	// free: the gate's shared side is already held here.
+	resp, err := t.send(req)
 	if err != nil {
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	traceHTTPResponse(resp, nil)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("retiring the proxy context: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // CSRF token accessors with mutex protection
@@ -1097,6 +1154,9 @@ func (t *Transport) callReauthFunc(ctx context.Context) error {
 	// error before this point leaves the old session untouched.
 	t.cookiesMu.Lock()
 	t.config.Cookies = cloneCookies(cookies)
+	// Another session now, perhaps another user's: the identity pin checks it
+	// again before the work that triggered this is retried.
+	t.credentialsChanged()
 	t.cookiesMu.Unlock()
 	t.setCSRFToken("")
 	t.setSessionID("")
@@ -1107,6 +1167,11 @@ func (t *Transport) callReauthFunc(ctx context.Context) error {
 	if t.cache != nil {
 		t.cache.invalidate()
 	}
+
+	// The token fetch is part of establishing the session, not work: it is
+	// not held to the identity pin (a 401 inside it would otherwise re-enter
+	// this function under reauthMu). The retried request is.
+	reauthCtx = context.WithValue(reauthCtx, preflightKey{}, t)
 
 	// Fetch CSRF token with the new cookies.
 	// Set lastReauth only after CSRF succeeds — if it fails, the next
@@ -1150,6 +1215,11 @@ func (t *Transport) adoptServerCookies(resp *http.Response) {
 		}
 		if held, ok := t.config.Cookies[c.Name]; ok && held != c.Value {
 			t.config.Cookies[c.Name] = c.Value
+			// Not a credential change for the identity pin: the verified
+			// system issued this cookie itself, and its verdict covers it.
+			// The pin guards against operator misconfiguration, not a
+			// hostile server; re-verifying here would preflight on every
+			// answer of an SSO system that refreshes its cookie.
 			if t.config.Verbose {
 				fmt.Fprintf(os.Stderr, "[AUTH] server reissued %s — using the new one\n", c.Name)
 			}
@@ -1246,6 +1316,7 @@ func (t *Transport) SetCookies(cookies map[string]string) {
 	t.cookiesMu.Lock()
 	defer t.cookiesMu.Unlock()
 	t.config.Cookies = cloneCookies(cookies)
+	t.credentialsChanged()
 }
 
 func cloneCookies(cookies map[string]string) map[string]string {
@@ -1317,11 +1388,16 @@ func stripContextID(req *http.Request) {
 // holds it or waits for it, the stateless one goes isolated at once. Requests
 // into the context wait their turn only as long as their own context lasts.
 func (t *Transport) do(req *http.Request) (*http.Response, error) {
+	// The identity pin, before anything leaves: the first request runs the
+	// preflight, and after a mismatch nothing is sent at all.
+	if err := t.admit(req); err != nil {
+		return nil, err
+	}
 	if req.Header.Get("X-sap-adt-sessiontype") == "stateless" {
 		if t.contextGate.tryShared() {
 			if t.contextInFlight.Load() == 0 && (t.locks == nil || !t.locks.present()) {
 				defer t.contextGate.releaseShared()
-				return t.httpClient.Do(req)
+				return t.send(req)
 			}
 			t.contextGate.releaseShared()
 		}
@@ -1332,7 +1408,7 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 		stripContextID(req)
 		client, ok := t.httpClient.(*http.Client)
 		if !ok || client.Jar == nil {
-			return t.httpClient.Do(req)
+			return t.send(req)
 		}
 		for _, c := range client.Jar.Cookies(req.URL) {
 			if c.Name != "sap-contextid" {
@@ -1341,6 +1417,9 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 		}
 		isolated := *client
 		isolated.Jar = nil
+		if callDeadlineGoverns(req.Context()) {
+			isolated.Timeout = 0
+		}
 		return isolated.Do(req)
 	}
 
@@ -1353,7 +1432,7 @@ func (t *Transport) do(req *http.Request) (*http.Response, error) {
 		return nil, &url.Error{Op: urlErrorOp(req.Method), URL: req.URL.String(), Err: err}
 	}
 	defer t.contextGate.unlock()
-	return t.httpClient.Do(req)
+	return t.send(req)
 }
 
 // urlErrorOp names the method the way net/http does in its *url.Error.

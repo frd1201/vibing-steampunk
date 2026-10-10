@@ -18,6 +18,12 @@ type SystemConfig struct {
 	Language string `json:"language,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
 
+	// Expect pins where this system's connection must land, as
+	// SID[.CLIENT][/USER] (e.g. "A4H.001/DEVELOPER"). vsp refuses to work when
+	// the configured user differs, before any logon, and when the system
+	// reports another SID, client or user on the first request.
+	Expect string `json:"expect,omitempty"`
+
 	// Optional CTS correlation attribute (for CR-level grouping, e.g. SAPTEST/ZCR)
 	TransportAttribute string `json:"transport_attribute,omitempty"`
 
@@ -48,6 +54,18 @@ type SystemConfig struct {
 	RFCPort     int    `json:"rfc_port,omitempty"`
 	RFCUser     string `json:"rfc_user,omitempty"`
 	RFCPassword string `json:"rfc_password,omitempty"`
+
+	// TransportCmd is the argv (no shell) of a helper process that carries
+	// every ADT request over its stdin/stdout instead of a TCP connection; the
+	// helper authenticates, so user/password/cookies must be absent. It is
+	// honoured only from a file in the user's home directory (see GetSystem):
+	// a project file must not be able to make vsp run a program.
+	TransportCmd []string `json:"transport_cmd,omitempty"`
+
+	// SNC reaches the system over SNC through SAP's sapnwrfc.dll (Windows
+	// only); GetSystem turns it into a transport command that runs this vsp
+	// as snc-serve. Honoured only from the home directory, like transport_cmd.
+	SNC *SNCSettings `json:"snc,omitempty"`
 
 	// Optional safety settings per system
 	ReadOnly        bool     `json:"read_only,omitempty"`
@@ -125,7 +143,48 @@ type SystemsConfig struct {
 	// Key: tool name, Value: true=enabled, false=disabled
 	// Tools not listed are enabled by default
 	Tools map[string]bool `json:"tools,omitempty"`
+
+	// source is the absolute path the config was read from; empty when it
+	// was built in memory.
+	source string
 }
+
+// checkTransportCmd decides whether a system's transport_cmd may be used.
+// It runs a program, so it is taken only from the user's home directory: a
+// .vsp.json checked into a repository and found in the working directory
+// would otherwise run whatever its author named the moment someone used vsp
+// there.
+func (c *SystemsConfig) checkTransportCmd(name string, sys *SystemConfig) error {
+	if len(sys.TransportCmd) == 0 {
+		return nil
+	}
+	if err := checkTrustedHomeConfig(c.source); err != nil {
+		where := c.source
+		if where == "" {
+			where = "a config not read from a file"
+		}
+		return fmt.Errorf("system '%s': transport_cmd is refused in %s (%v); it is honoured only in ~/.vsp.json or ~/.vsp/systems.json, because a project file must not be able to make vsp run a program", name, where, err)
+	}
+	for _, a := range sys.TransportCmd {
+		if a == "" {
+			return fmt.Errorf("system '%s': transport_cmd must be a list of non-empty strings", name)
+		}
+	}
+	// The file is trusted, but the working directory is not, and a program
+	// that is not an absolute path is looked up there: "./helper" directly, a
+	// bare name through a relative PATH entry or GODEBUG=execerrdot=0 from a
+	// project .env. Only an absolute path names one program.
+	if prog := sys.TransportCmd[0]; !filepath.IsAbs(prog) {
+		return fmt.Errorf("system '%s': transport_cmd must start with the absolute path of the program, not %q, which would be looked up from the working directory or PATH", name, prog)
+	}
+	if sys.User != "" || sys.Password != "" || sys.CookieFile != "" || sys.CookieString != "" || sys.UsesSSO() {
+		return fmt.Errorf("system '%s': transport_cmd carries its own authentication; remove user/password/cookies", name)
+	}
+	return nil
+}
+
+// Source is the path the config was read from; empty when built in memory.
+func (c *SystemsConfig) Source() string { return c.source }
 
 // ConfigPaths returns the list of paths to search for systems config.
 func ConfigPaths() []string {
@@ -170,6 +229,9 @@ func LoadSystemsFromFile(path string) (*SystemsConfig, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	if abs, err := filepath.Abs(path); err == nil {
+		cfg.source = abs
+	}
 
 	return &cfg, nil
 }
@@ -185,9 +247,20 @@ func (c *SystemsConfig) GetSystem(name string) (*SystemConfig, error) {
 		}
 		return nil, fmt.Errorf("system '%s' not found. Available: %s", name, strings.Join(available, ", "))
 	}
+	if err := c.checkTransportCmd(name, &sys); err != nil {
+		return nil, err
+	}
+	if sys.SNC != nil {
+		snc := *sys.SNC
+		sys.SNC = &snc // GetSystem's result must not alias the loaded config
+		if err := c.applySNC(name, &sys); err != nil {
+			return nil, err
+		}
+	}
 
-	// Resolve password from environment variable if not set
-	if sys.Password == "" {
+	// Resolve password from environment variable if not set. A system behind
+	// a transport command has no password of vsp's to send.
+	if sys.Password == "" && len(sys.TransportCmd) == 0 {
 		// Try VSP_<SYSTEM>_PASSWORD (e.g., VSP_A4H_PASSWORD)
 		envKey := fmt.Sprintf("VSP_%s_PASSWORD", strings.ToUpper(name))
 		if pwd := os.Getenv(envKey); pwd != "" {
@@ -286,6 +359,7 @@ func ExampleConfig() string {
 				URL:             "https://prod.example.com:44300",
 				User:            "READONLY_USER",
 				Client:          "100",
+				Expect:          "PRD.100/READONLY_USER",
 				ReadOnly:        true,
 				AllowedPackages: []string{"Z*", "Y*"},
 			},
