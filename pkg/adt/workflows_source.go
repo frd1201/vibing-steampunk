@@ -741,7 +741,6 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
 		}
-		unlocked = true
 
 		// Activate
 		activation, err := c.Activate(ctx, objectURL, name)
@@ -895,7 +894,6 @@ func (c *Client) writeSourceCreate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
 		}
-		unlocked = true
 
 		// Activate
 		activation, err := c.Activate(ctx, objectURL, name)
@@ -1214,7 +1212,6 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
 		}
-		unlocked = true
 
 		// Activate
 		activation, err := c.Activate(ctx, objectURL, name)
@@ -1319,7 +1316,6 @@ func (c *Client) writeSourceUpdate(ctx context.Context, objectType, name, source
 			result.Message = fmt.Sprintf("Failed to unlock object: %v", err)
 			return result, nil
 		}
-		unlocked = true
 
 		// Activate
 		activation, err := c.Activate(ctx, objectURL, name)
@@ -1478,7 +1474,6 @@ func (c *Client) writeClassMethodUpdate(ctx context.Context, className, methodNa
 		result.Message = fmt.Sprintf("Failed to unlock class: %v", err)
 		return result, nil
 	}
-	unlocked = true
 
 	// Activate
 	activation, err := c.Activate(ctx, objectURL, className)

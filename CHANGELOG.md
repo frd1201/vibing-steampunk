@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.61.0] - 2026-10-10
+Fork release on upstream **v2.61.0** (upstream head `6e1db96`): 55 commits, all
+by Alice V. None of our pull requests is open upstream.
+
+### Own changes
+
+- **adt:** the corrNr reaches the orphan-lock cleanup after a failed create (`tryCleanupOrphanLock` takes the transport), carried over into upstream's split `create.go` / `create_reconcile.go`
+- **release:** `.goreleaser.yml` follows upstream's six platforms (linux, darwin, windows on amd64 and arm64); linux-386, linux-arm and windows-386 are gone
+
+### Adopted from upstream
+
+- **dap:** `vsp dap`, debug ABAP from any DAP editor (#343, #346)
+- **adt:** `transport_cmd`, ADT over a helper process's stdin/stdout, and SNC through `sapnwrfc.dll` (#373, #377)
+- **cli:** `--expect` pins SAP system, client and user (#345)
+- **git:** abapGit zip import, conditional delete, delete order (#301, #320, #323)
+- **read:** summary mode and `if_none_match` (#344); lean ABAP Unit output, `result_text` for `execute_abap` (#298)
+- **fixes:** package lookup stays inside a held lock's session (#331), a package is missing only when SAP says so (#338), activation messages and call timeouts (#333, #299), 7.58 trace parsing (#376), BADI_IMPL cleanup (#349)
+- **refactor:** `client.go`, `crud.go`, `devops.go` and tool registration split by domain (#316–#319); CI gains leak scan, complexity metrics and an advisory OSD integration run
+- **docs:** CLAUDE.md trimmed, history moved to `docs/dev-notes.md` (#328); the fork keeps its banner and fork-only rows
+
 ## [3.58.2] - 2026-10-01
 Fork release on upstream **v2.58.0 + 46 commits** (upstream head `9789f00`, no
 new upstream tag yet). Four of our own pull requests come back from upstream in
