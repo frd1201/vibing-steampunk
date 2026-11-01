@@ -1,8 +1,18 @@
 # Vibing Steampunk (vsp)
 
+<p align="center">
+  <img src="media/vibing-steampunk.png" alt="Vibing ABAP Developer: a developer in a steampunk airship cabin, code drifting over the clouds" width="100%">
+</p>
+
 **AI-Agentic Development Unlocked for ABAP** — any system with ADT enabled, 7.50 upwards.
 The available surface varies by release, and `vsp compat` reports it per system: RAP needs
 S/4, AMDP needs HANA, and some ADT resources present on S/4 are absent on ERP.
+
+Part of the steampunk family:
+[open-steamgate](https://github.com/oisee/open-steamgate) (an ABAP application server you can clone),
+[abapiti](https://github.com/oisee/abapiti) (TypeScript and WASM to ABAP),
+[open-rfc-go](https://github.com/oisee/open-rfc-go) (RFC) and
+[open-diag-go](https://github.com/oisee/open-diag-go) (SAP GUI DIAG).
 
 > **Fork notice:** this is `frd1201/vibing-steampunk`, a downstream fork of
 > [oisee/vibing-steampunk](https://github.com/oisee/vibing-steampunk) with its own 3.x release line.
@@ -50,8 +60,6 @@ S/4, AMDP needs HANA, and some ADT resources present on S/4 are absent on ERP.
 > See also: [OData ↔ MCP Bridge](https://github.com/oisee/odata_mcp_go) for SAP data access.
 >
 > **Want to review or test?** Start here: **[Reviewer Guide](docs/reviewer-guide.md)** — 11 hands-on tasks, 6 of them fully offline.
-
-![Vibing ABAP Developer](./media/vibing-steampunk.png)
 
 ## Hot Right Now
 
