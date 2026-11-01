@@ -340,7 +340,13 @@ adopted yet.
 | [#283](https://github.com/oisee/vibing-steampunk/pull/283), [#288](https://github.com/oisee/vibing-steampunk/pull/288) | Alice V. | `--read-only` covers every writing path; one invariant over every tool | **adopted** 2026-10-01 | no fork code in the area. `LockObject` under `--read-only` now refuses every mode but READ, so the "MODIFY" lock the fork's deploy handlers take is refused there too, as intended |
 | [#256](https://github.com/oisee/vibing-steampunk/pull/256), [#257](https://github.com/oisee/vibing-steampunk/pull/257), [#258](https://github.com/oisee/vibing-steampunk/pull/258), [#259](https://github.com/oisee/vibing-steampunk/pull/259) | frd1201 | our own four | **merged** upstream | came back as duplicates of our tests; ours were dropped, see *Our open upstream PRs* |
 
-Watched, possible collision: #138 (InstallZADTVSP source deploy). #231, #229,
+Watched, possible collision: #138 (InstallZADTVSP source deploy).
+Open candidates for Workflow B (checked 2026-11-01, not adopted): #409 lets
+`writeFunctionModule` take the transport from the lock through `resolveWriteTransport`,
+which ours does not (`pkg/adt/workflows_function.go`), so a FUNC write without a
+named transport gets no corrNr from the lock; #386 (message texts keep the class's
+short text and package; touches our `WriteMessageClassTexts` pin); #402 (mcp-go
+v1.1.0 → v1.3.0, `tools/list` hang over stdio; a `go.mod` change). #231, #229,
 #251, #217 and #243 landed in the October sync and are decided above; #150 and
 #130 are settled by #214 and #213.
 
@@ -363,6 +369,7 @@ Deliberately not upstreamed. No PR is owed for these.
 
 | Sync | Upstream head | Scope | Notes |
 |---|---|---|---|
+| `sync 2026-11` | `c007ceb` (2026-10-22, v2.61.0 + 2) | 2 commits, 1 file, +10 / −2 | README only (#405). 1 conflict: upstream put the hero image under the title, where our fork notice sits. Upstream's order kept, the fork notice moved below the family line; the old image before *Hot Right Now* dropped with upstream's. No Go code, so no CHANGELOG entry and no release: v3.61.0 still describes the build. `LockObject` three-argument sites unchanged, `cookiejar.New` only in `newCookieJar`. |
 | `sync/upstream-2026-08` | `9b8789d` (2026-08-27) | 341 commits, 314 files, +52,440 | 13 conflicts. Upstream had independently built several of our fixes, so most resolutions were a choice between two implementations rather than a combination — upstream won wherever the effect was the same. Three defects would have merged in silently: a new upstream file calling the three-arg `LockObject` (broke `go build`), a duplicate jar-reset that discarded the `httpCookieJar` wrapper, and unreachable code that `go vet` rejects. |
 | `claude/admiring-ptolemy-r48db4` | `9886d27` (2026-09-24, v2.58.0 + 3) | 110 commits, 217 files, +23,513 | 13 conflicts, 35 hunks. `resetCookieJar` came back a third time, now in the ICMENOSESSION path (#207), and #210 brought a second `cookiejar.New`. Taking "theirs" in the two install loops compiles and counts every object twice. The variadic `LockObject` held — no build break — but five new lock sites arrived without corrNr, which nothing flagged; threaded in `05f4bd1`. |
 | `sync/upstream-2026-10b` | `6e1db96` (2026-10-09, v2.61.0) | 55 commits, 649 files, +83,611 / −42,616 | 15 conflicts, nearly all because upstream split `crud.go`, `client.go` and `devops.go` while we had edited them. `crud.go` was deleted upstream: our corrNr change to `tryCleanupOrphanLock` was re-applied in `create_reconcile.go`; the remaining `crud.go` edits were comment and variable-name changes (CreateTable gate order, `packageExists` known-gap note) and were not re-applied; upstream now resolves `packageExists` from SAP's own answer. `release.yml` stays ours, `.goreleaser.yml` dropped the 32-bit targets. No `LockObject` call lost its transport; the three-argument sites are the known intentional ones. |
