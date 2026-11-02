@@ -94,6 +94,13 @@ git switch main && git merge --no-ff sync/upstream-$(date +%Y-%m)
 git branch -d sync/upstream-$(date +%Y-%m)
 ```
 
+**A sync PR with no check runs at all is not green.** If the PR shows neither
+a pass nor a failure, look at *Settings → Actions* and the account's Actions
+billing before anything else: on 2026-11-02 no workflow had run in this repo
+since 2026-10-14, the nightly OSD cron included, so PR #13 sat with zero checks.
+Marking a draft *ready for review* does not start `ci.yml`; it listens to
+`opened`, `synchronize` and `reopened` only.
+
 **`lint (advisory)` is red on every sync PR — and that is not a finding.**
 The job runs with `only-new-issues`, which measures against the PR's diff, and a
 sync PR's diff is all of upstream's. Every upstream file counts as "new". The job
